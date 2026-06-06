@@ -1,0 +1,5 @@
+# Memory adalah data runtime di server — jangan commit isinya.
+memory/
+*.jsonl
+.venv/
+__pycache__/

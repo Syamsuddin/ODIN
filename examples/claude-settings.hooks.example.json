@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__deploy-agent__server_info",
+      "mcp__deploy-agent__tail_log",
+      "mcp__deploy-agent__http_health_check",
+      "mcp__deploy-agent__memory_recall",
+      "mcp__deploy-agent__memory_digest"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__deploy-agent__(run_command|service_action)",
+        "hooks": [
+          { "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/deploy_agent_guard.py\"",
+            "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}
