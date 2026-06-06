@@ -3,3 +3,12 @@ memory/
 *.jsonl
 .venv/
 __pycache__/
+.pytest_cache/
+
+# AI tools & config
+.claude/
+CLAUDE.md
+
+# Review & analisis
+REVIEW_EMPAT_FAKTOR.md
+EXECUTIVE_SUMMARY.md

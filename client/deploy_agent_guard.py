@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PreToolUse guard + RISK ENGINE untuk MCP deploy-agent.
+ODIN v0.9.0 — PreToolUse guard + RISK ENGINE untuk MCP ODIN.
 
 Model keamanan (sesuai niat user — akses penuh ke server live, keputusan akhir di user):
   - Perintah READ  (inspeksi file/sistem & kueri baca DB: SELECT/SHOW/DESCRIBE) -> allow
@@ -18,6 +18,9 @@ permissionDecision + reason (kartu risiko). Tool lain: tak berpendapat (fall-thr
 Pada error apa pun -> exit 0 tanpa output (jangan memblokir karena bug guard).
 """
 import json
+import os
+
+__version__ = "0.9.0"
 import re
 import sys
 
@@ -72,6 +75,30 @@ DOCKER_READ = {"ps", "images", "logs", "inspect", "version", "info", "stats",
 DB_READ_VERBS = re.compile(r"^\s*(select|show|describe|desc|explain|use|pragma)\b", re.I)
 # Aksi `find` yang sebenarnya MENULIS/menghapus -> bukan read.
 FIND_WRITE = re.compile(r"^-(delete|exec|execdir|ok|okdir|fprint|fls|fprintf)$")
+
+# --- Package manager & system tool: sub-perintah inspeksi (read-only) ---------
+APT_READ = {"list", "show", "search", "depends", "rdepends", "policy",
+            "showsrc", "changelog", "madison", "info"}
+DPKG_READ = {"-l", "--list", "-L", "--listfiles", "-s", "--status",
+             "-S", "--search", "-p", "--print-avail", "--info", "-I",
+             "--contents", "-c", "--audit"}
+PIP_READ = {"list", "show", "freeze", "check", "config", "--version", "-V"}
+NPM_READ = {"list", "ls", "view", "info", "outdated", "why", "audit",
+            "explain", "--version", "-v"}
+IP_READ = {"addr", "a", "address", "route", "r", "link", "l", "neigh", "n",
+           "neighbour", "rule", "tunnel", "maddress", "mroute", "monitor"}
+IP_WRITE_ACTIONS = {"add", "del", "delete", "change", "replace", "set",
+                    "flush", "append"}
+UFW_READ = {"status", "show", "version"}
+NGINX_READ = {"-t", "-T", "-V", "-v"}
+FAIL2BAN_READ = {"status", "get", "ping", "banned", "version"}
+CERTBOT_READ = {"certificates", "--help", "-h"}
+TIMEDATECTL_READ = {"status", "show", "timesync-status", "list-timezones"}
+LOGINCTL_READ = {"list-sessions", "list-users", "show-session", "show-user",
+                 "session-status", "user-status"}
+CURL_WRITE_FLAGS = {"--request", "--data", "--data-raw", "--data-binary",
+                    "--data-urlencode", "--form", "--upload-file",
+                    "--output", "--remote-name"}
 
 # --- Klien database: kueri baca (SELECT/SHOW/DESCRIBE) boleh auto-jalan -------
 DB_CLIENTS = {"mysql", "mariadb", "psql", "sqlite3", "mysqldump", "mysqladmin"}
@@ -132,8 +159,41 @@ def seg_is_read(seg: str) -> bool:
         return not any(FIND_WRITE.match(a) for a in args)
     if cmd in ("awk", "gawk", "mawk"):  # awk bisa menulis lewat system()/redirect
         return not re.search(r"system\s*\(|print(f)?\s*>|>>", seg)
-    if cmd in DB_CLIENTS:               # kueri baca DB boleh auto; tulis/unknown → ask
+    if cmd in DB_CLIENTS:
         return _db_seg_is_read(cmd, seg)
+    if cmd in ("apt", "apt-get", "apt-cache"):
+        return bool(args) and args[0] in APT_READ
+    if cmd == "dpkg":
+        return bool(args) and args[0] in DPKG_READ
+    if cmd in ("pip", "pip3"):
+        return bool(args) and args[0] in PIP_READ
+    if cmd in ("npm", "yarn", "pnpm"):
+        return bool(args) and args[0] in NPM_READ
+    if cmd == "ip":
+        if not args:
+            return True
+        return args[0] in IP_READ and not any(a in IP_WRITE_ACTIONS for a in args[1:])
+    if cmd == "ufw":
+        return bool(args) and args[0] in UFW_READ
+    if cmd in ("nginx", "apache2ctl", "httpd"):
+        return bool(args) and args[0] in NGINX_READ
+    if cmd == "fail2ban-client":
+        return bool(args) and args[0] in FAIL2BAN_READ
+    if cmd == "certbot":
+        return bool(args) and args[0] in CERTBOT_READ
+    if cmd == "timedatectl":
+        return not args or args[0] in TIMEDATECTL_READ
+    if cmd == "loginctl":
+        return bool(args) and args[0] in LOGINCTL_READ
+    if cmd == "curl":
+        for a in args:
+            if a.startswith("--"):
+                if a.split("=")[0] in CURL_WRITE_FLAGS:
+                    return False
+            elif a.startswith("-") and len(a) > 1:
+                if any(c in "XdFToO" for c in a[1:]):
+                    return False
+        return True
     return cmd in READ_CMDS
 
 
@@ -142,6 +202,8 @@ def classify_command(command: str) -> str:
     if not command.strip():
         return "ask"
     if DANGER.search(command):
+        return "ask"
+    if re.search(r'\$\(|`', command):
         return "ask"
     # Abaikan redirect stderr/stdout ke /dev/null (lazim di perintah read).
     c = re.sub(r"\d?>\s*/dev/null", " ", command)
@@ -318,12 +380,36 @@ def assess_command(command: str):
             "Tinjau perintah sebelum menyetujui")
 
 
-def risk_card(command: str, extra: str = "") -> str:
+def _get_mode() -> str:
+    """Baca mode operasi ODIN dari file lokal atau env var."""
+    try:
+        with open(os.path.expanduser("~/.odin_mode")) as f:
+            m = f.read().strip().lower()
+            if m in ("setup", "deploy", "production"):
+                return m
+    except (FileNotFoundError, PermissionError, OSError):
+        pass
+    m = os.environ.get("ODIN_MODE", "").strip().lower()
+    return m if m in ("setup", "deploy", "production") else "deploy"
+
+
+def _shift_tier(tier: str) -> str:
+    """Naikkan tier satu level (untuk mode production)."""
+    order = {"AMAN": 1, "RENDAH": 2, "SEDANG": 3, "TINGGI": 4, "KRITIS": 4}
+    reverse = {0: "AMAN", 1: "RENDAH", 2: "SEDANG", 3: "TINGGI", 4: "KRITIS"}
+    return reverse.get(order.get(tier, 2), tier)
+
+
+def risk_card(command: str, extra: str = "", mode: str = "deploy") -> str:
     tier, aksi, efek, saran = assess_command(command)
+    if mode == "production" and tier != "KRITIS":
+        tier = _shift_tier(tier)
     lines = [f"{TIER_ICON.get(tier, '')} RISIKO: {tier}",
              f"Aksi  : {aksi}",
              f"Efek  : {efek}",
              f"Saran : {saran}"]
+    if mode == "production":
+        lines.append("⚠️  Mode PRODUCTION — tier dinaikkan 1 level.")
     if tier == "KRITIS":
         lines.append("⛔ Server akan MENOLAK kecuali allow_dangerous=True (rem darurat). "
                      "Setujui hanya bila benar-benar disengaja.")
@@ -340,14 +426,17 @@ _SVC_RISK = {
 }
 
 
-def service_card(service: str, action: str) -> str:
+def service_card(service: str, action: str, mode: str = "deploy") -> str:
     tier, efek, saran = _SVC_RISK.get(action, ("SEDANG", "Mengubah state service", "Tinjau dampak"))
-    return "\n".join([
-        f"{TIER_ICON.get(tier, '')} RISIKO: {tier}",
-        f"Aksi  : systemctl {action} {service}",
-        f"Efek  : {efek}",
-        f"Saran : {saran}",
-    ])
+    if mode == "production" and tier != "KRITIS":
+        tier = _shift_tier(tier)
+    lines = [f"{TIER_ICON.get(tier, '')} RISIKO: {tier}",
+             f"Aksi  : systemctl {action} {service}",
+             f"Efek  : {efek}",
+             f"Saran : {saran}"]
+    if mode == "production":
+        lines.append("⚠️  Mode PRODUCTION — tier dinaikkan 1 level.")
+    return "\n".join(lines)
 
 
 def main() -> None:
@@ -357,22 +446,96 @@ def main() -> None:
         sys.exit(0)
     tool = data.get("tool_name", "") or ""
     ti = data.get("tool_input", {}) or {}
+    mode = _get_mode()
+
+    if tool.endswith("inspect_server"):
+        emit("allow", "🟢 AMAN — inspect_server hanya membaca state server (read-only).")
 
     if tool.endswith("run_command"):
         cmd = ti.get("command", "") or ""
         if ti.get("allow_dangerous"):
             emit("ask", risk_card(cmd, "Flag allow_dangerous=True aktif — rem darurat dilepas. "
-                                       "Konfirmasi manual wajib."))
+                                       "Konfirmasi manual wajib.", mode))
         if classify_command(cmd) == "allow":
             emit("allow", "🟢 AMAN (read-only / inspeksi) — dijalankan otomatis.")
-        emit("ask", risk_card(cmd))
+        emit("ask", risk_card(cmd, mode=mode))
 
     if tool.endswith("service_action"):
         action = ti.get("action", "status") or "status"
         service = ti.get("service", "") or "?"
         if action in ("status", "is-active", "is-enabled"):
             emit("allow", f"🟢 AMAN — service_action '{action}' read-only — dijalankan otomatis.")
-        emit("ask", service_card(service, action))
+        emit("ask", service_card(service, action, mode))
+
+    if tool.endswith("laravel_deploy"):
+        app = ti.get("app_path", "?")
+        branch = ti.get("branch", "main")
+        steps = ["git reset --hard (buang perubahan lokal)"]
+        if ti.get("composer", True):
+            steps.append("composer install --no-dev")
+        if ti.get("migrate", True):
+            steps.append("artisan migrate --force")
+        steps.append("optimize + cache")
+        if ti.get("npm_build"):
+            steps.append("npm ci && npm run build")
+        fpm = ti.get("fpm_service")
+        if fpm:
+            steps.append(f"reload {fpm}")
+        emit("ask", "\n".join([
+            "🟠 RISIKO: TINGGI",
+            f"Aksi  : Deploy Laravel branch '{branch}' ke {app}",
+            f"Langkah: {' → '.join(steps)}",
+            "Efek  : Perubahan lokal server HILANG (git reset --hard); skema DB bisa berubah (migrate)",
+            "Saran : Pastikan backup DB tersedia; deploy saat trafik rendah",
+        ]))
+
+    if tool.endswith("run_tests"):
+        emit("allow", "🟢 AMAN — run_tests hanya membaca & menjalankan test suite.")
+
+    if tool.endswith("memory_write"):
+        ns = ti.get("ns", "?")
+        key = ti.get("key", "") or "(auto)"
+        text = (ti.get("text") or "")[:100]
+        emit("ask", "\n".join([
+            "🟢 RISIKO: RENDAH",
+            f"Aksi  : Simpan memory [{ns}] key={key}",
+            "Efek  : Entry tersimpan/ditimpa; muncul di konteks sesi berikutnya",
+            f"Isi   : {text}{'…' if len(ti.get('text', '')) > 100 else ''}",
+        ]))
+
+    if tool.endswith("memory_forget"):
+        rid = ti.get("id", "") or f"{ti.get('ns', '')}:{ti.get('key', '')}"
+        emit("ask", "\n".join([
+            "🟢 RISIKO: RENDAH",
+            f"Aksi  : Hapus memory [{rid}]",
+            "Efek  : Entry dihapus (logis); tak muncul di sesi berikutnya",
+        ]))
+
+    if tool.endswith("runbook"):
+        rb_name = ti.get("name", "?")
+        rb_steps = ti.get("steps") or []
+        labels = [s.get("label", "?") for s in rb_steps[:10]]
+        max_tier = "AMAN"
+        has_write = False
+        for s in rb_steps:
+            cmd = s.get("command", "")
+            if cmd and classify_command(cmd) != "allow":
+                has_write = True
+                tier = assess_command(cmd)[0]
+                if TIER_ORDER.get(tier, 0) > TIER_ORDER.get(max_tier, 0):
+                    max_tier = tier
+        if not has_write:
+            emit("allow", f"🟢 AMAN — Runbook '{rb_name}' hanya berisi langkah read-only.")
+        emit("ask", "\n".join([
+            f"{TIER_ICON.get(max_tier, '🟡')} RISIKO: {max_tier}",
+            f"Aksi  : Runbook '{rb_name}' — {len(rb_steps)} langkah",
+            f"Langkah: {' → '.join(labels)}{'…' if len(rb_steps) > 10 else ''}",
+            "Efek  : Semua langkah dijalankan berurutan; berhenti pada kegagalan pertama",
+            "Saran : Tinjau perintah setiap langkah; risiko = tier langkah paling berisiko",
+        ]))
+
+    if tool.endswith("rollback_plan"):
+        emit("allow", "🟢 AMAN — rollback_plan hanya membaca riwayat sesi (read-only).")
 
     sys.exit(0)  # tool lain: tanpa pendapat
 

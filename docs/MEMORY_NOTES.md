@@ -1,6 +1,6 @@
-# deploy-agent — Memory Management
+# ODIN — Memory Management
 
-Patch menambahkan sistem memory persisten ke MCP server `deploy-agent`. Memory bertahan
+Sistem memory persisten pada MCP server ODIN. Memory bertahan
 lintas sesi dan **otomatis termuat di konteks tiap sesi baru** (lewat `FastMCP(instructions=...)`,
 karena server di-spawn fresh tiap sesi via SSH stdio).
 
@@ -33,7 +33,7 @@ karena server di-spawn fresh tiap sesi via SSH stdio).
 - `text` ≤ `MEMORY_MAX_TEXT` (4000).
 - **Secret-guard**: nilai mirip password/token/private-key/JWT ditolak kecuali `allow_secret=True`.
 
-## ENV baru (di `run.sh`)
+## ENV (di `run.sh`)
 
 ```
 MEMORY_DIR=/home/deploy/agent/memory   # folder simpanan
@@ -45,7 +45,7 @@ MEMORY_MAX_ENTRIES=2000                 # ambang compaction
 
 1. Review file ini + `deploy_agent.py` di lokal.
 2. Salin ke server: `deploy_agent.py` → `/home/deploy/agent/`, `run.sh` → `/home/deploy/agent/run.sh`.
-3. Restart sesi MCP (reconnect) agar 4 tool baru terdaftar & memory ter-load.
+3. Restart sesi MCP (reconnect) agar tool terdaftar & memory ter-load.
 4. Seed awal (opsional), via tool `memory_write`:
    - `profile/owner`: "Syams — admin SIMURU"
    - `server/fpm_service` (pinned): "php-fpm = php8.3-fpm"

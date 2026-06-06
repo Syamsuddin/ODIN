@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "deploy-agent": {
+    "odin": {
       "type": "stdio",
       "command": "ssh",
       "args": ["vps-app", "/home/deploy/agent/run.sh"],

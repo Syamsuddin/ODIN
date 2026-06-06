@@ -1,17 +1,20 @@
 {
   "permissions": {
     "allow": [
-      "mcp__deploy-agent__server_info",
-      "mcp__deploy-agent__tail_log",
-      "mcp__deploy-agent__http_health_check",
-      "mcp__deploy-agent__memory_recall",
-      "mcp__deploy-agent__memory_digest"
+      "mcp__odin__server_info",
+      "mcp__odin__tail_log",
+      "mcp__odin__http_health_check",
+      "mcp__odin__memory_recall",
+      "mcp__odin__memory_digest",
+      "mcp__odin__session_history",
+      "mcp__odin__rollback_plan",
+      "mcp__odin__inspect_server"
     ]
   },
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "mcp__deploy-agent__(run_command|service_action)",
+        "matcher": "mcp__odin__(run_command|service_action|laravel_deploy|run_tests|runbook|inspect_server|memory_write|memory_forget)",
         "hooks": [
           { "type": "command",
             "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/deploy_agent_guard.py\"",
