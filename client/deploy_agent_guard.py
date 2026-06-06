@@ -22,6 +22,7 @@ import os
 
 __version__ = "0.9.0"
 import re
+import subprocess
 import sys
 
 
@@ -400,14 +401,20 @@ def _shift_tier(tier: str) -> str:
     return reverse.get(order.get(tier, 2), tier)
 
 
-def risk_card(command: str, extra: str = "", mode: str = "deploy") -> str:
+def risk_card(command: str, extra: str = "", mode: str = "deploy",
+              cwd: str = "") -> str:
     tier, aksi, efek, saran = assess_command(command)
     if mode == "production" and tier != "KRITIS":
         tier = _shift_tier(tier)
-    lines = [f"{TIER_ICON.get(tier, '')} RISIKO: {tier}",
-             f"Aksi  : {aksi}",
-             f"Efek  : {efek}",
-             f"Saran : {saran}"]
+    sep = "━" * 40
+    lines = [sep,
+             f"{TIER_ICON.get(tier, '')} RISIKO: {tier}",
+             f"Cmd   : {command}"]
+    if cwd:
+        lines.append(f"Dir   : {cwd}")
+    lines += [f"Aksi  : {aksi}",
+              f"Efek  : {efek}",
+              f"Saran : {saran}"]
     if mode == "production":
         lines.append("⚠️  Mode PRODUCTION — tier dinaikkan 1 level.")
     if tier == "KRITIS":
@@ -415,6 +422,7 @@ def risk_card(command: str, extra: str = "", mode: str = "deploy") -> str:
                      "Setujui hanya bila benar-benar disengaja.")
     if extra:
         lines.append(extra)
+    lines.append(sep)
     return "\n".join(lines)
 
 
@@ -430,12 +438,15 @@ def service_card(service: str, action: str, mode: str = "deploy") -> str:
     tier, efek, saran = _SVC_RISK.get(action, ("SEDANG", "Mengubah state service", "Tinjau dampak"))
     if mode == "production" and tier != "KRITIS":
         tier = _shift_tier(tier)
-    lines = [f"{TIER_ICON.get(tier, '')} RISIKO: {tier}",
-             f"Aksi  : systemctl {action} {service}",
-             f"Efek  : {efek}",
+    sep = "━" * 40
+    lines = [sep,
+             f"{TIER_ICON.get(tier, '')} RISIKO: {tier}",
+             f"Cmd   : systemctl {action} {service}",
+             f"Aksi  : {efek}",
              f"Saran : {saran}"]
     if mode == "production":
         lines.append("⚠️  Mode PRODUCTION — tier dinaikkan 1 level.")
+    lines.append(sep)
     return "\n".join(lines)
 
 
@@ -453,12 +464,13 @@ def main() -> None:
 
     if tool.endswith("run_command"):
         cmd = ti.get("command", "") or ""
+        cwd = ti.get("cwd", "") or ""
         if ti.get("allow_dangerous"):
             emit("ask", risk_card(cmd, "Flag allow_dangerous=True aktif — rem darurat dilepas. "
-                                       "Konfirmasi manual wajib.", mode))
+                                       "Konfirmasi manual wajib.", mode, cwd))
         if classify_command(cmd) == "allow":
             emit("allow", "🟢 AMAN (read-only / inspeksi) — dijalankan otomatis.")
-        emit("ask", risk_card(cmd, mode=mode))
+        emit("ask", risk_card(cmd, mode=mode, cwd=cwd))
 
     if tool.endswith("service_action"):
         action = ti.get("action", "status") or "status"
@@ -481,12 +493,16 @@ def main() -> None:
         fpm = ti.get("fpm_service")
         if fpm:
             steps.append(f"reload {fpm}")
+        sep = "━" * 40
         emit("ask", "\n".join([
+            sep,
             "🟠 RISIKO: TINGGI",
-            f"Aksi  : Deploy Laravel branch '{branch}' ke {app}",
-            f"Langkah: {' → '.join(steps)}",
+            f"App   : {app}",
+            f"Branch: {branch}",
+            f"Aksi  : Deploy Laravel — {' → '.join(steps)}",
             "Efek  : Perubahan lokal server HILANG (git reset --hard); skema DB bisa berubah (migrate)",
             "Saran : Pastikan backup DB tersedia; deploy saat trafik rendah",
+            sep,
         ]))
 
     if tool.endswith("run_tests"):
@@ -496,19 +512,25 @@ def main() -> None:
         ns = ti.get("ns", "?")
         key = ti.get("key", "") or "(auto)"
         text = (ti.get("text") or "")[:100]
+        sep = "━" * 40
         emit("ask", "\n".join([
+            sep,
             "🟢 RISIKO: RENDAH",
             f"Aksi  : Simpan memory [{ns}] key={key}",
             "Efek  : Entry tersimpan/ditimpa; muncul di konteks sesi berikutnya",
             f"Isi   : {text}{'…' if len(ti.get('text', '')) > 100 else ''}",
+            sep,
         ]))
 
     if tool.endswith("memory_forget"):
         rid = ti.get("id", "") or f"{ti.get('ns', '')}:{ti.get('key', '')}"
+        sep = "━" * 40
         emit("ask", "\n".join([
+            sep,
             "🟢 RISIKO: RENDAH",
             f"Aksi  : Hapus memory [{rid}]",
             "Efek  : Entry dihapus (logis); tak muncul di sesi berikutnya",
+            sep,
         ]))
 
     if tool.endswith("runbook"):
@@ -526,12 +548,15 @@ def main() -> None:
                     max_tier = tier
         if not has_write:
             emit("allow", f"🟢 AMAN — Runbook '{rb_name}' hanya berisi langkah read-only.")
+        sep = "━" * 40
         emit("ask", "\n".join([
+            sep,
             f"{TIER_ICON.get(max_tier, '🟡')} RISIKO: {max_tier}",
             f"Aksi  : Runbook '{rb_name}' — {len(rb_steps)} langkah",
             f"Langkah: {' → '.join(labels)}{'…' if len(rb_steps) > 10 else ''}",
             "Efek  : Semua langkah dijalankan berurutan; berhenti pada kegagalan pertama",
             "Saran : Tinjau perintah setiap langkah; risiko = tier langkah paling berisiko",
+            sep,
         ]))
 
     if tool.endswith("rollback_plan"):
@@ -540,5 +565,21 @@ def main() -> None:
     sys.exit(0)  # tool lain: tanpa pendapat
 
 
+def _check_update_bg() -> None:
+    """Jalankan update checker di background (fire-and-forget, tak blokir guard)."""
+    checker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "update_checker.py")
+    if not os.path.isfile(checker):
+        return
+    try:
+        subprocess.Popen(
+            [sys.executable, checker],
+            stdout=subprocess.DEVNULL, stderr=open(os.devnull, "w"),
+            start_new_session=True,
+        )
+    except OSError:
+        pass
+
+
 if __name__ == "__main__":
+    _check_update_bg()
     main()

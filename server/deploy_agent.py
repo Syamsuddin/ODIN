@@ -307,6 +307,24 @@ def _analyze_output(result: dict) -> dict:
     return {"error_type": error_type, "hints": hints}
 
 
+def _build_summary(result: dict) -> str:
+    cmd = result.get("command", "?")
+    dur = result.get("duration_sec", "")
+    dur_str = f" ({dur}s)" if dur else ""
+    if result.get("blocked"):
+        return f"⛔ DITOLAK — {cmd}"
+    if result.get("blocked_by_mode"):
+        return f"⛔ DIBLOKIR mode {result.get('mode', '?')} — {cmd}"
+    if result.get("timeout"):
+        return f"⏱ TIMEOUT — {cmd}{dur_str}"
+    analysis = result.get("_analysis", {})
+    etype = analysis.get("error_type", "")
+    if result.get("success"):
+        return f"✓ OK — {cmd}{dur_str}"
+    tag = f" [{etype}]" if etype else ""
+    return f"✗ GAGAL (exit {result.get('exit_code', '?')}){tag} — {cmd}{dur_str}"
+
+
 # ---------------------------------------------------------------------------
 # AUDIT LOG: jejak eksekusi append-only — JANGAN dihapus / compact.
 # Berbeda dari memory (yang di-fold/compact), audit log adalah catatan
@@ -1017,6 +1035,7 @@ def run_command(command: str, cwd: str = "", timeout: int = DEFAULT_TIMEOUT,
     rb = _suggest_rollback(command, pre) if pre else []
     if rb:
         result["_rollback_hint"] = rb
+    result["_summary"] = _build_summary(result)
     _audit("run_command", command, result)
     _session_log("run_command", command, result, pre_state=pre or None, rollback=rb or None)
     return result
