@@ -13,7 +13,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ### Added — Fase 2: Intelligence Core
 
-- **Command suggestions**: 15 dari 23 error pattern kini menyertakan `suggested_commands` (daftar perintah + level risiko)
+- **Command suggestions**: 18 dari 23 error pattern kini menyertakan `suggested_commands` (daftar perintah + level risiko)
 - **Error frequency tracking**: per-session `_error_counts`, flag `recurring` + `recurring_hint` saat error >= 3x
 - **Deploy config persistence**: auto-save konfigurasi deploy terakhir ke memory, auto-load sesi berikutnya
 - **Trend detection**: ring-buffer metrik (max 7 snapshot), `_compute_trend` membandingkan current vs oldest

@@ -461,7 +461,7 @@ Auto-detect juga mendukung: PostgreSQL, MongoDB, Docker, Apache, Redis, Supervis
 | Dependensi runtime | 1 (`mcp[cli]`) |
 | MCP tools | 17 |
 | MCP resources | 2 (`memory://{ns}`, `health://live`) |
-| Error patterns | 23 (15 with suggested_commands) |
+| Error patterns | 23 (18 with suggested_commands) |
 | Risk rules | 26 shell + DB assessor |
 | Undo hint patterns | 12 |
 | Runbook templates | 4 builtin + custom |
