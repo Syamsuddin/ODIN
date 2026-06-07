@@ -3,19 +3,14 @@
 </p>
 
 <p align="center">
-  <a href="#"><img src="https://img.shields.io/badge/version-1.1.0-gold?style=for-the-badge&logo=semanticrelease&logoColor=white" alt="Version 1.0.0"/></a>
   <a href="#"><img src="https://img.shields.io/badge/python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.10+"/></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=for-the-badge&logo=gnu&logoColor=white" alt="AGPL-3.0"/></a>
-  <a href="#"><img src="https://img.shields.io/badge/tests-80_passing-brightgreen?style=for-the-badge&logo=pytest&logoColor=white" alt="80 Tests Passing"/></a>
 </p>
 
 <p align="center">
   <a href="#"><img src="https://img.shields.io/badge/MCP_Tools-15-00bcd4?style=flat-square&logo=lightning&logoColor=white" alt="15 MCP Tools"/></a>
   <a href="#"><img src="https://img.shields.io/badge/Security-4_Layers-e53935?style=flat-square&logo=shield&logoColor=white" alt="4 Security Layers"/></a>
   <a href="#"><img src="https://img.shields.io/badge/Risk_Tiers-5-ff9800?style=flat-square&logo=alert&logoColor=white" alt="5 Risk Tiers"/></a>
-  <a href="#"><img src="https://img.shields.io/badge/Dependencies-1_(mcp%5Bcli%5D)-4caf50?style=flat-square&logo=pypi&logoColor=white" alt="1 Dependency"/></a>
-  <a href="#"><img src="https://img.shields.io/badge/Daemon-Zero-4caf50?style=flat-square&logo=linux&logoColor=white" alt="Zero Daemon"/></a>
-  <a href="#"><img src="https://img.shields.io/badge/Transport-SSH_stdio-0097a7?style=flat-square&logo=gnometerminal&logoColor=white" alt="SSH stdio"/></a>
 </p>
 
 <p align="center">
@@ -26,9 +21,6 @@
   <i>Perintah natural-language dari manusia &#8594; Claude Code memahami intent &#8594; ODIN mengeksekusi di server &#8594; analisis &#8594; ulangi sampai selesai.</i>
 </p>
 
-<p align="center">
-  <b>Dua file Python. Satu dependensi. Nol framework. Nol daemon.</b>
-</p>
 
 ---
 
