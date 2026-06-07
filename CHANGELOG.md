@@ -4,6 +4,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ---
 
+## [1.1.0] — 2026-06-07
+
+### Added
+
+- **Slash sub-commands**: 6 sub-command `/odin:help`, `/odin:about`, `/odin:status`, `/odin:doctor`, `/odin:check-update`, `/odin:setup`
+- `/odin:about` — penjelasan fitur ODIN (15 tools, 4 lapis keamanan, cara pakai)
+- `/odin:status` — quick status server (disk, memory, uptime, services) + load memory
+- `/odin:doctor` — diagnostik 5 langkah (file lokal, config MCP, guard hook, SSH, MCP server)
+- `/odin:check-update` — cek versi terbaru via `update_checker.py` atau git fetch
+- `/odin:setup` — rekonfigurasi interaktif MCP config & guard hook dari dalam sesi Claude Code
+
+### Changed
+
+- `/odin` disederhanakan: hanya banner + hint help (tanpa MCP call, lebih cepat)
+- `__version__` dinaikkan dari `1.0.0` ke `1.1.0` di kedua file Python
+- Header SVG dan README badges diupdate ke v1.1
+
+---
+
 ## [1.0.0] — 2026-06-07
 
 Rilis stabil pertama. Seluruh fitur inti lengkap, teruji (80 test), dan terdokumentasi menyeluruh. Promosi dari v0.9.0 setelah validasi arsitektur, review teknis 4 dimensi, dan analisis dampak.

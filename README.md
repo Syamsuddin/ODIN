@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#"><img src="https://img.shields.io/badge/version-1.0.0-gold?style=for-the-badge&logo=semanticrelease&logoColor=white" alt="Version 1.0.0"/></a>
+  <a href="#"><img src="https://img.shields.io/badge/version-1.1.0-gold?style=for-the-badge&logo=semanticrelease&logoColor=white" alt="Version 1.0.0"/></a>
   <a href="#"><img src="https://img.shields.io/badge/python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.10+"/></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=for-the-badge&logo=gnu&logoColor=white" alt="AGPL-3.0"/></a>
   <a href="#"><img src="https://img.shields.io/badge/tests-80_passing-brightgreen?style=for-the-badge&logo=pytest&logoColor=white" alt="80 Tests Passing"/></a>
@@ -480,7 +480,7 @@ Filosofi: READ auto-approve, WRITE wajib konfirmasi, katastrofik double-brake. G
 
 ## Lisensi & Versi
 
-Versi aktif: **1.0.0** — tersimpan di `__version__` pada kedua file Python.
+Versi aktif: **1.1.0** — tersimpan di `__version__` pada kedua file Python.
 Lihat [CHANGELOG.md](CHANGELOG.md) untuk riwayat perubahan lengkap.
 
-*ODIN v1.0 — ringan, cerdas, aman. Satu file di server, satu file di laptop, otak Claude.*
+*ODIN v1.1 — ringan, cerdas, aman. Satu file di server, satu file di laptop, otak Claude.*

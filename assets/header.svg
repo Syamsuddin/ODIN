@@ -118,7 +118,7 @@
   <!-- Version badge -->
   <g transform="translate(600, 175)">
     <rect x="-30" y="0" width="60" height="20" rx="10" fill="#e8b830" opacity="0.15"/>
-    <text x="0" y="14" text-anchor="middle" font-family="monospace" font-size="12" fill="#e8b830" font-weight="bold">v1.0</text>
+    <text x="0" y="14" text-anchor="middle" font-family="monospace" font-size="12" fill="#e8b830" font-weight="bold">v1.1</text>
   </g>
 
   <!-- Subtitle -->

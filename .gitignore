@@ -5,8 +5,9 @@ memory/
 __pycache__/
 .pytest_cache/
 
-# AI tools & config
-.claude/
+# AI tools & config (kecuali slash commands)
+.claude/*
+!.claude/commands/
 CLAUDE.md
 
 # Review & analisis (lokal saja)

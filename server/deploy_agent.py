@@ -53,7 +53,7 @@ Jalan :  python3 deploy_agent.py     (dijalankan otomatis oleh Claude Code via M
 
 from __future__ import annotations
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 import fcntl
 import json

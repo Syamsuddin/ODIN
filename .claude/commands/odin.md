@@ -1,8 +1,4 @@
-Saat user menjalankan /odin, lakukan langkah berikut PERSIS dalam urutan ini:
-
-## Langkah 1 — Tampilkan Banner
-
-Tampilkan teks berikut PERSIS sebagai code block (jangan ubah karakter atau spasi apapun):
+Saat user menjalankan /odin, tampilkan teks berikut PERSIS sebagai code block (jangan ubah karakter atau spasi apapun):
 
 ```
 
@@ -14,7 +10,7 @@ Tampilkan teks berikut PERSIS sebagai code block (jangan ubah karakter atau spas
    ╚═════╝ ╚═════╝ ╚═╝╚═╝  ╚═══╝
 
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  ⚡ MCP Deploy Agent for Claude Code
+  ⚡ MCP Deploy Agent for Claude Code v1.1
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   Created by Syams Ideris
@@ -22,39 +18,8 @@ Tampilkan teks berikut PERSIS sebagai code block (jangan ubah karakter atau spas
 
 ```
 
-## Langkah 2 — Load Konteks
+Lalu tampilkan tepat satu baris berikut (bukan code block):
 
-Panggil 2 tool MCP secara paralel:
-1. `mcp__odin__memory_digest` — untuk load semua memory (instruksi, profil server, profil user)
-2. `mcp__odin__server_info` — untuk ambil status server terkini (disk, memory, uptime)
+> Ketik **/odin:help** untuk daftar perintah, atau **/odin:status** untuk cek server.
 
-Jika salah satu gagal (misal server tidak terhubung), lanjutkan dengan data yang tersedia. Jangan error.
-
-## Langkah 3 — Tampilkan Status
-
-Setelah mendapat respons dari kedua tool, tampilkan ringkasan singkat dalam format ini:
-
-```
-Server    : [hostname/alias] ([server_type], mode: [mode])
-Uptime    : [uptime]
-Disk      : [usage]%
-Memory    : [used]/[total]
-Services  : [daftar service aktif, misal: nginx ✓, php-fpm ✓, mysql ✓]
-
-Memory    : [jumlah] entries aktif ([jumlah] instruksi)
-```
-
-Jika server tidak terhubung, tampilkan:
-
-```
-Server    : tidak terhubung
-            Pastikan SSH alias dan ODIN server sudah di-setup.
-```
-
-## Langkah 4 — Siap Menerima Perintah
-
-Akhiri dengan satu baris:
-
-> Siap menerima perintah. Ketik apa saja tentang server Anda.
-
-Jangan tambahkan penjelasan lain. Respons harus ringkas dan langsung.
+Jangan panggil tool MCP apapun. Jangan tambahkan penjelasan lain. Respons harus ringkas dan langsung.
