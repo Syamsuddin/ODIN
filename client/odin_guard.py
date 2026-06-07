@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ODIN v1.0.0 — PreToolUse guard + RISK ENGINE untuk MCP ODIN.
+ODIN v1.0.0 — PreToolUse guard + RISK ENGINE + PostToolUse mode-sync untuk MCP ODIN.
 
 Model keamanan (sesuai niat user — akses penuh ke server live, keputusan akhir di user):
   - Perintah READ  (inspeksi file/sistem & kueri baca DB: SELECT/SHOW/DESCRIBE) -> allow
@@ -450,11 +450,42 @@ def service_card(service: str, action: str, mode: str = "deploy") -> str:
     return "\n".join(lines)
 
 
+def _sync_mode_from_result(data: dict) -> None:
+    """PostToolUse: tulis mode operasi ke ~/.odin_mode dari hasil inspect_server."""
+    tool = data.get("tool_name", "") or ""
+    if not tool.endswith("inspect_server"):
+        return
+    result = data.get("tool_result")
+    if not result:
+        return
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except (json.JSONDecodeError, TypeError):
+            return
+    mode = ""
+    if isinstance(result, dict):
+        mode = result.get("mode", "")
+    if mode not in ("setup", "deploy", "production"):
+        return
+    try:
+        path = os.path.expanduser("~/.odin_mode")
+        with open(path, "w") as f:
+            f.write(mode + "\n")
+    except OSError:
+        pass
+
+
 def main() -> None:
     try:
         data = json.load(sys.stdin)
     except Exception:
         sys.exit(0)
+
+    if "tool_result" in data:
+        _sync_mode_from_result(data)
+        sys.exit(0)
+
     tool = data.get("tool_name", "") or ""
     ti = data.get("tool_input", {}) or {}
     mode = _get_mode()

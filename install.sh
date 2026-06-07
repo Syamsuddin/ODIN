@@ -337,6 +337,19 @@ pre = hooks.setdefault('PreToolUse', [])
 pre[:] = [h for h in pre if not (isinstance(h, dict) and 'mcp__odin__' in h.get('matcher', ''))]
 pre.append(ODIN_HOOK)
 
+# PostToolUse: auto-sync mode dari inspect_server
+POST_HOOK = {
+    'matcher': 'mcp__odin__inspect_server',
+    'hooks': [{
+        'type': 'command',
+        'command': f\"python3 '{guard_path}'\",
+        'timeout': 10
+    }]
+}
+post = hooks.setdefault('PostToolUse', [])
+post[:] = [h for h in post if not (isinstance(h, dict) and 'mcp__odin__' in h.get('matcher', ''))]
+post.append(POST_HOOK)
+
 with open(settings_path, 'w') as f:
     json.dump(data, f, indent=2)
     f.write('\n')
@@ -778,6 +791,18 @@ EOF
        "PreToolUse": [
          {
            "matcher": "mcp__odin__(run_command|service_action|laravel_deploy|run_tests|runbook|inspect_server|memory_write|memory_forget)",
+           "hooks": [
+             {
+               "type": "command",
+               "command": "python3 '${guard_path}'",
+               "timeout": 10
+             }
+           ]
+         }
+       ],
+       "PostToolUse": [
+         {
+           "matcher": "mcp__odin__inspect_server",
            "hooks": [
              {
                "type": "command",

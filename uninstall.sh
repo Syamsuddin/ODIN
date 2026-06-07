@@ -120,13 +120,14 @@ try:
         perms['allow'] = new_allow
         changed = True
 
-    # Hapus hooks odin
+    # Hapus hooks odin (PreToolUse + PostToolUse)
     hooks = data.get('hooks', {})
-    pre = hooks.get('PreToolUse', [])
-    new_pre = [h for h in pre if not (isinstance(h, dict) and 'mcp__odin__' in h.get('matcher', ''))]
-    if len(new_pre) != len(pre):
-        hooks['PreToolUse'] = new_pre
-        changed = True
+    for event in ('PreToolUse', 'PostToolUse'):
+        lst = hooks.get(event, [])
+        new_lst = [h for h in lst if not (isinstance(h, dict) and 'mcp__odin__' in h.get('matcher', ''))]
+        if len(new_lst) != len(lst):
+            hooks[event] = new_lst
+            changed = True
 
     if changed:
         with open('$settings_path', 'w') as f:

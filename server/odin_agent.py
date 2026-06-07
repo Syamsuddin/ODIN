@@ -233,6 +233,8 @@ def _run(command: str, cwd: str | None = None, timeout: int = DEFAULT_TIMEOUT,
 # ---------------------------------------------------------------------------
 _ERROR_PATTERNS = [
     # --- Database (spesifik SQLSTATE dulu, sebelum pola umum "Connection refused") ---
+    (r"SQLSTATE\[HY000\] \[1045\]|Access denied for user", "db_auth",
+     "Autentikasi DB gagal. Cek: cat .env | grep DB_PASSWORD, lalu mysql -u<user> -p secara manual."),
     (r"SQLSTATE\[HY000\] \[2002\]|Can't connect to .* MySQL", "db_conn",
      "Tidak bisa konek ke database. Cek: systemctl status mysql && cat .env | grep DB_"),
     (r"SQLSTATE\[42S02\]|Table .+ doesn't exist|Base table .+ not found", "db_table_missing",
@@ -274,7 +276,7 @@ _ERROR_PATTERNS = [
     (r"Address already in use|port .+ already in use", "port_in_use",
      "Port sudah terpakai. Cek: ss -tlnp | grep <port>."),
     # --- Tool-specific ---
-    (r"nginx: \[emerg\]|nginx: configuration file .+ test failed", "nginx_config",
+    (r"nginx: \[emerg\]|nginx:.*test failed|nginx:.*configuration.*failed", "nginx_config",
      "Config Nginx error. Jalankan: nginx -t untuk detail. JANGAN reload sebelum config valid."),
     (r"SSL.+error|certificate.+expired|SSL_ERROR", "ssl",
      "Masalah SSL. Cek: certbot certificates."),
@@ -447,6 +449,7 @@ def _ensure_store() -> None:
 def _mem_append(record: dict) -> None:
     """Tulis satu record sebagai satu baris JSON. O_APPEND + flock = aman konkuren."""
     _ensure_store()
+    _fold_invalidate()
     line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
     fd = os.open(MEMORY_FILE, os.O_WRONLY | os.O_APPEND)
     try:
@@ -467,11 +470,24 @@ def _is_expired(rec: dict, now: datetime) -> bool:
         return False
 
 
+_fold_cache: dict[str, dict] | None = None
+
+
+def _fold_invalidate() -> None:
+    global _fold_cache
+    _fold_cache = None
+
+
 def _mem_fold() -> dict[str, dict]:
     """Baca seluruh log, lipat jadi state terkini per id (last-write-wins).
-    Buang record ber-deleted=True dan yang sudah kedaluwarsa."""
+    Buang record ber-deleted=True dan yang sudah kedaluwarsa.
+    Hasil di-cache dalam sesi; invalidasi otomatis saat append/compact."""
+    global _fold_cache
+    if _fold_cache is not None:
+        return _fold_cache
     if not os.path.exists(MEMORY_FILE):
-        return {}
+        _fold_cache = {}
+        return _fold_cache
     state: dict[str, dict] = {}
     with open(MEMORY_FILE, "r", encoding="utf-8") as f:
         fcntl.flock(f.fileno(), fcntl.LOCK_SH)
@@ -490,13 +506,15 @@ def _mem_fold() -> dict[str, dict]:
         finally:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     now = datetime.now(timezone.utc)
-    return {rid: r for rid, r in state.items()
-            if not r.get("deleted") and not _is_expired(r, now)}
+    _fold_cache = {rid: r for rid, r in state.items()
+                   if not r.get("deleted") and not _is_expired(r, now)}
+    return _fold_cache
 
 
 def _mem_compact(live: dict[str, dict]) -> None:
     """Tulis ulang log hanya berisi record hidup (atomic via temp + os.replace)."""
     _ensure_store()
+    _fold_invalidate()
     tmp = MEMORY_FILE + ".tmp"
     fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     try:
@@ -994,10 +1012,44 @@ def _build_instructions() -> str:
     return digest + mode_info
 
 
+_STARTUP_CACHE_MAX_AGE = 3600  # detik — pakai cache profile jika inspeksi < 1 jam lalu
+
+
+def _try_cached_startup() -> bool:
+    """Coba muat profile dari memory jika inspeksi terakhir masih segar.
+    Return True jika berhasil pakai cache (skip full inspect)."""
+    global _PROFILE, _CURRENT_MODE
+    try:
+        fold = _mem_fold()
+        rec = fold.get("server:stack-profile")
+        if not rec:
+            return False
+        text = rec.get("text", "")
+        first_line = text.split("\n", 1)[0]
+        parts = {p.split("=", 1)[0].strip(): p.split("=", 1)[1].strip()
+                 for p in first_line.split("|") if "=" in p}
+        inspected = parts.get("inspected")
+        if not inspected:
+            return False
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(inspected)).total_seconds()
+        if age > _STARTUP_CACHE_MAX_AGE:
+            return False
+        stype = parts.get("type", "general")
+        mode = parts.get("mode", "deploy")
+        _PROFILE = {"type": stype, "mode": mode, "inspected_at": inspected,
+                     "_cached": True}
+        _CURRENT_MODE = mode
+        log.info("Pakai cache profile (usia %ds): type=%s mode=%s", int(age), stype, mode)
+        return True
+    except Exception as e:
+        log.debug("cache startup gagal: %s — fallback ke full inspect", e)
+        return False
+
+
 # Inspeksi saat startup (lewati jika ODIN_SKIP_INSPECT=1, mis. saat testing)
 if os.environ.get("ODIN_SKIP_INSPECT", "").strip() in ("1", "true", "yes"):
     log.info("ODIN_SKIP_INSPECT=1 — inspeksi dilewati")
-else:
+elif not _try_cached_startup():
     try:
         _PROFILE = _full_inspect()
         _CURRENT_MODE = _PROFILE.get("mode", "deploy")
@@ -1545,7 +1597,9 @@ def memory_digest() -> dict:
     """Kembalikan ringkasan memory yang sama dengan yang disuntik ke konteks saat startup
     (profil user + instruksi durable + fakta server ter-pin). Berguna untuk menyegarkan
     ingatan di tengah sesi tanpa membaca seluruh entry."""
+    active = _mem_fold()
     return {"success": True, "digest": _build_memory_digest(),
+            "total_active": len(active),
             "namespaces": list(MEMORY_NAMESPACES), "file": MEMORY_FILE}
 
 

@@ -197,6 +197,18 @@ function Show-ConfigGuide {
                }
              ]
            }
+         ],
+         "PostToolUse": [
+           {
+             "matcher": "mcp__odin__inspect_server",
+             "hooks": [
+               {
+                 "type": "command",
+                 "command": "python3 '$guardPath'",
+                 "timeout": 10
+               }
+             ]
+           }
          ]
        }
      }
