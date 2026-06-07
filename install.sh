@@ -227,14 +227,13 @@ import json, sys
 try:
     d = json.load(open('$claude_json'))
     mcp = d.get('mcpServers', {})
-    for name in ('odin', 'deploy-agent'):
-        entry = mcp.get(name)
-        if entry and entry.get('args'):
-            args = entry['args']
-            host = args[0] if len(args) > 0 else ''
-            path = args[1] if len(args) > 1 else ''
-            print(f'{name}|{host}|{path}')
-            sys.exit(0)
+    entry = mcp.get('odin')
+    if entry and entry.get('args'):
+        args = entry['args']
+        host = args[0] if len(args) > 0 else ''
+        path = args[1] if len(args) > 1 else ''
+        print(f'odin|{host}|{path}')
+        sys.exit(0)
     sys.exit(1)
 except Exception:
     sys.exit(1)
@@ -267,9 +266,6 @@ except (FileNotFoundError, json.JSONDecodeError):
     data = {}
 
 mcp = data.setdefault('mcpServers', {})
-
-# Hapus entry lama jika ada
-mcp.pop('deploy-agent', None)
 
 mcp['odin'] = {
     'type': 'stdio',
@@ -338,8 +334,7 @@ for tool in ODIN_ALLOW:
 hooks = data.setdefault('hooks', {})
 pre = hooks.setdefault('PreToolUse', [])
 
-# Hapus hook odin/deploy-agent lama
-pre[:] = [h for h in pre if not (isinstance(h, dict) and 'mcp__odin__' in h.get('matcher', '') or 'mcp__deploy-agent__' in h.get('matcher', ''))]
+pre[:] = [h for h in pre if not (isinstance(h, dict) and 'mcp__odin__' in h.get('matcher', ''))]
 pre.append(ODIN_HOOK)
 
 with open(settings_path, 'w') as f:

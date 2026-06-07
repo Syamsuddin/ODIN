@@ -71,10 +71,9 @@ try:
         data = json.load(f)
     mcp = data.get('mcpServers', {})
     removed = []
-    for name in ('odin', 'deploy-agent'):
-        if name in mcp:
-            del mcp[name]
-            removed.append(name)
+    if 'odin' in mcp:
+        del mcp['odin']
+        removed.append('odin')
     if removed:
         with open(r'$ClaudeJson', 'w') as f:
             json.dump(data, f, indent=2)
