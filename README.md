@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <a href="#"><img src="https://img.shields.io/badge/MCP_Tools-15-00bcd4?style=flat-square&logo=lightning&logoColor=white" alt="15 MCP Tools"/></a>
+  <a href="#"><img src="https://img.shields.io/badge/MCP_Tools-17-00bcd4?style=flat-square&logo=lightning&logoColor=white" alt="17 MCP Tools"/></a>
   <a href="#"><img src="https://img.shields.io/badge/Security-4_Layers-e53935?style=flat-square&logo=shield&logoColor=white" alt="4 Security Layers"/></a>
   <a href="#"><img src="https://img.shields.io/badge/Risk_Tiers-5-ff9800?style=flat-square&logo=alert&logoColor=white" alt="5 Risk Tiers"/></a>
 </p>
@@ -45,15 +45,16 @@ LAPTOP (Claude Code CLI)                    SERVER (Ubuntu VPS, user: odin)
 ┌─────────────────────────┐  SSH stdio MCP  ┌────────────────────────────────┐
 │                         │ ──────────────▶ │                                │
 │  odin_guard.py  │  spawn fresh    │  odin_agent.py (ODIN server) │
-│  ├─ READ/WRITE classify │  per sesi       │  ├─ 15 MCP tools               │
-│  ├─ Risk engine (5 tier)│                 │  ├─ Output intelligence (22)   │
+│  ├─ READ/WRITE classify │  per sesi       │  ├─ 17 MCP tools               │
+│  ├─ Risk engine (5 tier)│                 │  ├─ Output intelligence (23)   │
 │  ├─ Mode-aware tier     │                 │  ├─ Rollback tracking          │
-│  └─ Kartu risiko UI     │                 │  ├─ Runbook engine (maks 20)   │
-│                         │                 │  ├─ Server profiler + modes    │
-│  585 baris Python       │                 │  ├─ Memory persisten (JSONL)   │
-│                         │                 │  ├─ Audit log (append-only)    │
-│                         │                 │  └─ Pre-flight deploy checks   │
-│                         │                 │  1578 baris Python             │
+│  ├─ Undo hints (12 pat) │                 │  ├─ Runbook engine + templates │
+│  └─ Kartu risiko UI     │                 │  ├─ Server profiler + modes    │
+│                         │                 │  ├─ Memory persisten (JSONL)   │
+│  651 baris Python       │                 │  ├─ Audit log + audit_tail     │
+│                         │                 │  ├─ Deploy fingerprint & drift │
+│                         │                 │  └─ Watchdog (health://live)   │
+│                         │                 │  2046 baris Python             │
 └─────────────────────────┘                 └────────────────────────────────┘
 ```
 
@@ -66,14 +67,21 @@ LAPTOP (Claude Code CLI)                    SERVER (Ubuntu VPS, user: odin)
 ```
 ODIN/
 ├── server/
-│   ├── odin_agent.py    # MCP server ODIN (1578 baris) — jalan di VPS
+│   ├── odin_agent.py    # MCP server ODIN (2046 baris) — jalan di VPS
 │   └── run.sh             # Launcher: set env + exec venv python
 ├── client/
-│   ├── odin_guard.py  # Risk engine + gerbang read/write (585 baris) — jalan di laptop
+│   ├── odin_guard.py  # Risk engine + gerbang read/write (651 baris) — jalan di laptop
 │   └── update_checker.py      # Cek versi terbaru dari GitHub (155 baris)
-├── tests/
-│   ├── test_fase3.py          # Test runbook & rollback (36 tests)
-│   └── test_profile_mode.py   # Test server profiler & mode (44 tests)
+├── tests/                     # 485 tests across 10 files
+│   ├── test_core.py           # Core functions (44 tests)
+│   ├── test_guard.py          # Guard classifier & risk engine (160 tests)
+│   ├── test_memory.py         # Memory system (58 tests)
+│   ├── test_output_intelligence.py  # Error patterns (48 tests)
+│   ├── test_fase2_intelligence.py   # Suggestions, tracking, trends (25 tests)
+│   ├── test_fase3.py          # Runbook & rollback (36 tests)
+│   ├── test_fase3_ux.py       # Audit tail, undo hints, templates (32 tests)
+│   ├── test_fase4_proactive.py # Fingerprint, drift, budget, watchdog (38 tests)
+│   └── test_profile_mode.py   # Server profiler & mode (44 tests)
 ├── docs/
 │   └── MEMORY_NOTES.md        # Dokumentasi sistem memory
 ├── install.sh                 # Installer + server setup wizard (macOS & Linux, 857 baris)
@@ -87,11 +95,11 @@ ODIN/
 └── REVIEW_EMPAT_FAKTOR.md     # Review teknis 4 dimensi
 ```
 
-**Total**: 2318 baris source + 758 baris test = **3076 baris**
+**Total**: 2852 baris source + 3545 baris test = **6397 baris**
 
 ---
 
-## 15 Tools MCP
+## 17 Tools MCP + 2 Resources
 
 ### Eksekusi & Inspeksi
 
@@ -116,8 +124,10 @@ ODIN/
 | Tool | Fungsi | Approval |
 |------|--------|----------|
 | `runbook` | Eksekusi workflow multi-langkah (maks 20 step) dengan error analysis & rollback per step | Kartu risiko (tier tertinggi) |
+| `runbook_templates` | List/ambil template runbook builtin & custom | Otomatis |
 | `rollback_plan` | Tampilkan saran undo untuk operasi destruktif terakhir | Otomatis |
 | `session_history` | Riwayat semua operasi di sesi ini (in-memory, hilang saat respawn) | Otomatis |
+| `audit_tail` | Baca audit log dengan filter (last, tool, success, since) | Otomatis |
 
 ### Memory Persisten
 
@@ -128,11 +138,12 @@ ODIN/
 | `memory_forget` | Hapus memory entry (tombstone) | Kartu risiko RENDAH |
 | `memory_digest` | Tampilkan seluruh memory aktif (sama dengan yang di-inject saat startup) | Otomatis |
 
-### MCP Resource
+### MCP Resources
 
 | Resource | Fungsi |
-|----------|--------|
+| --- | --- |
 | `memory://{ns}` | Baca memory per namespace (read-only, tanpa tool call) |
+| `health://live` | Watchdog: cek disk, memory, load, service status — untuk polling via `/loop` |
 
 ---
 
@@ -445,13 +456,15 @@ Auto-detect juga mendukung: PostgreSQL, MongoDB, Docker, Apache, Redis, Supervis
 
 | Metrik | Nilai |
 |--------|-------|
-| Total kode | 2318 baris Python (server 1578 + guard 585 + updater 155) |
-| Total test | 758 baris (80 automated tests) |
+| Total kode | 2852 baris Python (server 2046 + guard 651 + updater 155) |
+| Total test | 3545 baris (485 automated tests, 10 files) |
 | Dependensi runtime | 1 (`mcp[cli]`) |
-| MCP tools | 15 |
-| MCP resources | 1 (`memory://{ns}`) |
-| Error patterns | 22 |
+| MCP tools | 17 |
+| MCP resources | 2 (`memory://{ns}`, `health://live`) |
+| Error patterns | 23 (15 with suggested_commands) |
 | Risk rules | 26 shell + DB assessor |
+| Undo hint patterns | 12 |
+| Runbook templates | 4 builtin + custom |
 | READ sub-classifiers | 23 (git, docker, mysql, npm, curl, ufw, nginx, ...) |
 | Risk tiers | 5 (AMAN / RENDAH / SEDANG / TINGGI / KRITIS) |
 | Operation modes | 3 (setup / deploy / production) |
@@ -475,4 +488,4 @@ Filosofi: READ auto-approve, WRITE wajib konfirmasi, katastrofik double-brake. G
 Versi aktif: **1.1.0** — tersimpan di `__version__` pada kedua file Python.
 Lihat [CHANGELOG.md](CHANGELOG.md) untuk riwayat perubahan lengkap.
 
-*ODIN v1.1 — ringan, cerdas, aman. Satu file di server, satu file di laptop, otak Claude.*
+*ODIN v1.2 — ringan, cerdas, aman. Satu file di server, satu file di laptop, otak Claude.*

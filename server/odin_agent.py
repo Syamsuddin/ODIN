@@ -53,7 +53,7 @@ Jalan :  python3 odin_agent.py     (dijalankan otomatis oleh Claude Code via MCP
 
 from __future__ import annotations
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 import fcntl
 import json
@@ -91,6 +91,7 @@ SSH_KEY = os.environ.get("SSH_KEY", "").strip()
 DEFAULT_TIMEOUT = int(os.environ.get("DEFAULT_TIMEOUT", "180"))
 MAX_TIMEOUT = int(os.environ.get("MAX_TIMEOUT", "900"))
 OUTPUT_LIMIT = int(os.environ.get("OUTPUT_LIMIT", "20000"))
+CONTEXT_BUDGET = int(os.environ.get("CONTEXT_BUDGET", "5000"))
 
 PROJECT_ROOT = os.environ.get("PROJECT_ROOT", "").strip().rstrip("/")
 # Niat user: AKSES PENUH server. PROJECT_ROOT kini hanya DEFAULT cwd (di-set run.sh),
@@ -154,6 +155,28 @@ def _truncate(text: str) -> str:
         return text or ""
     half = OUTPUT_LIMIT // 2
     return f"{text[:half]}\n...[{len(text) - OUTPUT_LIMIT} karakter dipotong]...\n{text[-half:]}"
+
+
+def _smart_output(result: dict) -> dict:
+    """Jika stdout > CONTEXT_BUDGET, ganti dengan ringkasan head+tail + _output_meta."""
+    stdout = result.get("stdout", "")
+    if not stdout or len(stdout) <= CONTEXT_BUDGET:
+        return result
+    lines = stdout.splitlines()
+    total_lines = len(lines)
+    head = lines[:5]
+    tail = lines[-10:]
+    result["_output_meta"] = {
+        "total_chars": len(stdout),
+        "total_lines": total_lines,
+        "truncated": True,
+        "head_lines": 5,
+        "tail_lines": 10,
+    }
+    result["stdout"] = "\n".join(head) + \
+        f"\n\n...[{total_lines - 15} baris diringkas — total {total_lines} baris, " \
+        f"{len(stdout)} karakter]...\n\n" + "\n".join(tail)
+    return result
 
 
 def _path_inside(path: str, allowed: list[str]) -> bool:
@@ -233,80 +256,133 @@ def _run(command: str, cwd: str | None = None, timeout: int = DEFAULT_TIMEOUT,
 # ---------------------------------------------------------------------------
 _ERROR_PATTERNS = [
     # --- Database (spesifik SQLSTATE dulu, sebelum pola umum "Connection refused") ---
+    # Format: (regex, error_type, hint_text, suggested_commands)
+    # suggested_commands opsional — tuple 3-elem (tanpa saran) tetap didukung.
     (r"SQLSTATE\[HY000\] \[1045\]|Access denied for user", "db_auth",
-     "Autentikasi DB gagal. Cek: cat .env | grep DB_PASSWORD, lalu mysql -u<user> -p secara manual."),
+     "Autentikasi DB gagal. Cek: cat .env | grep DB_PASSWORD, lalu mysql -u<user> -p secara manual.",
+     [{"cmd": "cat .env | grep DB_", "risk": "AMAN"},
+      {"cmd": "mysql -u$DB_USERNAME -p -e 'SELECT 1'", "risk": "AMAN"}]),
     (r"SQLSTATE\[HY000\] \[2002\]|Can't connect to .* MySQL", "db_conn",
-     "Tidak bisa konek ke database. Cek: systemctl status mysql && cat .env | grep DB_"),
+     "Tidak bisa konek ke database. Cek: systemctl status mysql && cat .env | grep DB_",
+     [{"cmd": "systemctl status mysql", "risk": "AMAN"},
+      {"cmd": "cat .env | grep DB_", "risk": "AMAN"},
+      {"cmd": "systemctl restart mysql", "risk": "SEDANG"}]),
     (r"SQLSTATE\[42S02\]|Table .+ doesn't exist|Base table .+ not found", "db_table_missing",
-     "Tabel DB tidak ada. Jalankan: php artisan migrate --force."),
+     "Tabel DB tidak ada. Jalankan: php artisan migrate --force.",
+     [{"cmd": "php artisan migrate:status", "risk": "AMAN"},
+      {"cmd": "php artisan migrate --force", "risk": "SEDANG"}]),
     (r"SQLSTATE\[42S22\]|Unknown column", "db_column_missing",
-     "Kolom DB tidak ada. Cek migrasi terbaru; mungkin perlu php artisan migrate."),
+     "Kolom DB tidak ada. Cek migrasi terbaru; mungkin perlu php artisan migrate.",
+     [{"cmd": "php artisan migrate:status", "risk": "AMAN"},
+      {"cmd": "php artisan migrate --force", "risk": "SEDANG"}]),
     (r"SQLSTATE\[23000\]|Duplicate entry|Integrity constraint", "db_constraint",
      "Pelanggaran constraint DB (duplikat/FK). Cek data konflik sebelum retry."),
     (r"Too many connections|max_connections", "db_max_conn",
-     "Koneksi DB penuh. Cek: mysql -e 'SHOW PROCESSLIST'."),
+     "Koneksi DB penuh. Cek: mysql -e 'SHOW PROCESSLIST'.",
+     [{"cmd": "mysql -e 'SHOW PROCESSLIST'", "risk": "AMAN"}]),
     (r"lock wait timeout|Deadlock found", "db_lock",
-     "Deadlock/lock timeout. Cek: mysql -e 'SHOW ENGINE INNODB STATUS' | grep -A5 DEADLOCK."),
+     "Deadlock/lock timeout. Cek: mysql -e 'SHOW ENGINE INNODB STATUS' | grep -A5 DEADLOCK.",
+     [{"cmd": "mysql -e 'SHOW ENGINE INNODB STATUS' | grep -A5 DEADLOCK", "risk": "AMAN"}]),
     (r"SQLSTATE", "db_error",
      "Error database. Periksa pesan SQLSTATE lengkap untuk diagnosis."),
     # --- PHP / Laravel ---
     (r"Class ['\"]?[\w\\]+['\"]? not found|ReflectionException", "class_not_found",
-     "Class PHP tidak ditemukan. Jalankan: composer dump-autoload atau composer install."),
+     "Class PHP tidak ditemukan. Jalankan: composer dump-autoload atau composer install.",
+     [{"cmd": "composer dump-autoload", "risk": "RENDAH"},
+      {"cmd": "composer install --no-dev", "risk": "SEDANG"}]),
     (r"PHP Fatal error|PHP Parse error|Uncaught (?:Error|Exception)", "php_fatal",
      "Error fatal PHP. Periksa file & baris yang disebutkan di pesan error."),
     (r"Allowed memory size .+ exhausted", "php_oom",
-     "PHP kehabisan memori. Naikkan memory_limit di php.ini atau jalankan di CLI."),
+     "PHP kehabisan memori. Naikkan memory_limit di php.ini atau jalankan di CLI.",
+     [{"cmd": "php -i | grep memory_limit", "risk": "AMAN"},
+      {"cmd": "free -h", "risk": "AMAN"}]),
     (r"max_execution_time|Maximum execution time .+ exceeded", "php_timeout",
-     "Timeout PHP. Di CLI tidak ada batas; atau naikkan max_execution_time di php.ini."),
+     "Timeout PHP. Di CLI tidak ada batas; atau naikkan max_execution_time di php.ini.",
+     [{"cmd": "php -i | grep max_execution_time", "risk": "AMAN"}]),
     (r"Your lock file does not contain a compatible set|Composer detected issues", "composer_lock",
-     "composer.lock tidak sinkron. Jalankan: composer update (bukan install)."),
+     "composer.lock tidak sinkron. Jalankan: composer update (bukan install).",
+     [{"cmd": "composer validate", "risk": "AMAN"},
+      {"cmd": "composer update", "risk": "SEDANG"}]),
     # --- Sistem ---
     (r"No space left on device", "disk_full",
-     "Disk penuh. Jalankan: df -h && du -sh /var/log/* /tmp/* | sort -rh | head"),
+     "Disk penuh. Jalankan: df -h && du -sh /var/log/* /tmp/* | sort -rh | head",
+     [{"cmd": "df -h", "risk": "AMAN"},
+      {"cmd": "du -sh /var/log/* /tmp/* | sort -rh | head", "risk": "AMAN"},
+      {"cmd": "find /var/log -name '*.gz' -mtime +30 -delete", "risk": "TINGGI"}]),
     (r"Out of memory|oom-kill|Cannot allocate memory|SIGKILL|signal 9|Killed", "killed",
-     "Proses di-kill (kemungkinan OOM). Cek: dmesg | tail -20 && free -h."),
+     "Proses di-kill (kemungkinan OOM). Cek: dmesg | tail -20 && free -h.",
+     [{"cmd": "dmesg | tail -20", "risk": "AMAN"},
+      {"cmd": "free -h", "risk": "AMAN"}]),
     (r"Permission denied", "permission",
-     "Akses ditolak. Periksa kepemilikan (ls -la) dan izin user."),
+     "Akses ditolak. Periksa kepemilikan (ls -la) dan izin user.",
+     [{"cmd": "ls -la", "risk": "AMAN"},
+      {"cmd": "id", "risk": "AMAN"}]),
     (r"command not found", "missing_cmd",
      "Perintah tidak ditemukan. Cek: which <cmd> atau apt list --installed | grep <pkg>."),
     (r"Connection refused", "conn_refused",
-     "Koneksi ditolak. Cek apakah service jalan: systemctl status <service>."),
+     "Koneksi ditolak. Cek apakah service jalan: systemctl status <service>.",
+     [{"cmd": "ss -tlnp", "risk": "AMAN"}]),
     (r"failed to open stream|No such file or directory", "file_not_found",
      "File/directory tidak ditemukan. Verifikasi path: ls -la <path>."),
     (r"Address already in use|port .+ already in use", "port_in_use",
-     "Port sudah terpakai. Cek: ss -tlnp | grep <port>."),
+     "Port sudah terpakai. Cek: ss -tlnp | grep <port>.",
+     [{"cmd": "ss -tlnp", "risk": "AMAN"}]),
     # --- Tool-specific ---
     (r"nginx: \[emerg\]|nginx:.*test failed|nginx:.*configuration.*failed", "nginx_config",
-     "Config Nginx error. Jalankan: nginx -t untuk detail. JANGAN reload sebelum config valid."),
+     "Config Nginx error. Jalankan: nginx -t untuk detail. JANGAN reload sebelum config valid.",
+     [{"cmd": "nginx -t", "risk": "AMAN"},
+      {"cmd": "tail -20 /var/log/nginx/error.log", "risk": "AMAN"}]),
     (r"SSL.+error|certificate.+expired|SSL_ERROR", "ssl",
-     "Masalah SSL. Cek: certbot certificates."),
+     "Masalah SSL. Cek: certbot certificates.",
+     [{"cmd": "certbot certificates", "risk": "AMAN"},
+      {"cmd": "openssl s_client -connect localhost:443 2>/dev/null | head -5", "risk": "AMAN"}]),
     (r"npm ERR!", "npm_error",
-     "Error npm. Coba: rm -rf node_modules && npm ci."),
+     "Error npm. Coba: rm -rf node_modules && npm ci.",
+     [{"cmd": "node -v && npm -v", "risk": "AMAN"},
+      {"cmd": "rm -rf node_modules && npm ci", "risk": "SEDANG"}]),
 ]
+
+# Counter error per-session (reset tiap server di-spawn ulang).
+_error_counts: dict[str, int] = {}
 
 
 def _analyze_output(result: dict) -> dict:
-    """Scan stdout+stderr untuk pola error umum. Kembalikan hints untuk Claude."""
+    """Scan stdout+stderr untuk pola error umum. Kembalikan hints + suggested_commands
+    untuk Claude. Lacak frekuensi error per-session; tandai jika berulang."""
     if result.get("success"):
         return {}
     hints: list[str] = []
+    suggestions: list[dict] = []
     error_type = None
     if result.get("timeout"):
         hints.append("Perintah timeout. Naikkan timeout atau pecah jadi langkah lebih kecil.")
         error_type = "timeout"
     combined = ((result.get("stdout") or "") + " " + (result.get("stderr") or "")).strip()
     if combined:
-        for pattern, etype, hint in _ERROR_PATTERNS:
+        for entry in _ERROR_PATTERNS:
+            pattern, etype, hint = entry[0], entry[1], entry[2]
             if re.search(pattern, combined, re.IGNORECASE):
                 if not error_type:
                     error_type = etype
+                    if len(entry) > 3 and entry[3]:
+                        suggestions = entry[3]
                 hints.append(hint)
     if not hints and result.get("exit_code") and result["exit_code"] > 0:
         hints.append(f"Exit code {result['exit_code']}. Baca stderr untuk diagnosis.")
         error_type = error_type or "generic_failure"
     if not hints:
         return {}
-    return {"error_type": error_type, "hints": hints}
+    analysis: dict = {"error_type": error_type, "hints": hints}
+    if suggestions:
+        analysis["suggested_commands"] = suggestions
+    if error_type:
+        _error_counts[error_type] = _error_counts.get(error_type, 0) + 1
+        if _error_counts[error_type] >= 3:
+            analysis["recurring"] = True
+            analysis["recurring_hint"] = (
+                f"Error '{error_type}' sudah terjadi {_error_counts[error_type]}x sesi ini. "
+                "Pertimbangkan investigasi root cause atau memory_write untuk catat quirk ini.")
+    return analysis
 
 
 def _build_summary(result: dict) -> str:
@@ -879,6 +955,22 @@ def _full_inspect() -> dict:
                "inspected_at": _now_iso()}
     profile["mode"] = _derive_mode(profile)
     _save_profile_summary(profile)
+    # Trend detection: simpan snapshot metrik dan bandingkan dengan histori.
+    try:
+        fold = _mem_fold()
+        hist_rec = fold.get("server:metrics-history")
+        history: list[dict] = []
+        if hist_rec:
+            try:
+                history = json.loads(hist_rec.get("text", "[]"))
+            except (json.JSONDecodeError, TypeError):
+                pass
+        trend = _compute_trend(base, history)
+        if trend:
+            profile["_trend"] = trend
+        _save_metrics_snapshot(base)
+    except Exception:
+        log.debug("trend detection gagal", exc_info=True)
     log.info("Inspeksi selesai: type=%s mode=%s", stype, profile["mode"])
     return profile
 
@@ -965,6 +1057,52 @@ def _save_profile_summary(profile: dict) -> None:
                      "created_at": _now_iso(), "pinned": True, "deleted": False})
     except Exception as e:
         log.warning("gagal simpan profile ke memory: %s", e)
+
+
+def _save_metrics_snapshot(base: dict) -> None:
+    """Simpan snapshot metrik ke ring-buffer (maks 7 entry) di memory."""
+    fold = _mem_fold()
+    rec = fold.get("server:metrics-history")
+    history: list[dict] = []
+    if rec:
+        try:
+            history = json.loads(rec.get("text", "[]"))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    snapshot = {
+        "ts": _now_iso(),
+        "disk_pct": base.get("disk_pct", 0),
+        "memory_pct": base.get("memory_pct", 0),
+        "uptime_days": base.get("uptime_days", 0),
+    }
+    history.append(snapshot)
+    history = history[-7:]
+    try:
+        _mem_append({"id": "server:metrics-history", "ns": "server",
+                     "key": "metrics-history", "text": json.dumps(history),
+                     "tags": ["metrics", "auto"], "created_at": _now_iso(),
+                     "pinned": False, "deleted": False})
+    except Exception:
+        log.debug("gagal simpan metrics snapshot", exc_info=True)
+
+
+def _compute_trend(current: dict, history: list[dict]) -> dict:
+    """Bandingkan metrik saat ini dengan snapshot tertua untuk deteksi tren."""
+    if not history:
+        return {}
+    oldest = history[0]
+    trend: dict = {}
+    for key in ("disk_pct", "memory_pct"):
+        cur_val = current.get(key, 0)
+        old_val = oldest.get(key, 0)
+        diff = cur_val - old_val
+        span = len(history)
+        if abs(diff) >= 3:
+            trend[key] = {"delta": diff, "direction": "naik" if diff > 0 else "turun",
+                          "summary": f"{'+' if diff > 0 else ''}{diff}% vs {span} snapshot lalu"}
+        else:
+            trend[key] = {"delta": 0, "direction": "stabil", "summary": "stabil"}
+    return trend
 
 
 # ---------------------------------------------------------------------------
@@ -1088,6 +1226,7 @@ def run_command(command: str, cwd: str = "", timeout: int = DEFAULT_TIMEOUT,
     if rb:
         result["_rollback_hint"] = rb
     result["_summary"] = _build_summary(result)
+    result = _smart_output(result)
     _audit("run_command", command, result)
     _session_log("run_command", command, result, pre_state=pre or None, rollback=rb or None)
     return result
@@ -1112,6 +1251,7 @@ def tail_log(path: str, lines: int = 100, grep: str = "") -> dict:
     if grep:
         cmd += f" | grep -i -- {shlex.quote(grep)} || true"
     result = _run(cmd, None, 60)
+    result = _smart_output(result)
     _audit("tail_log", f"{path} lines={n} grep={grep!r}", result)
     _session_log("tail_log", f"{path} grep={grep!r}", result)
     return result
@@ -1149,6 +1289,98 @@ def service_action(service: str, action: str = "status") -> dict:
     return result
 
 
+def _load_deploy_defaults() -> dict:
+    """Muat konfigurasi deploy terakhir dari memory (jika ada)."""
+    fold = _mem_fold()
+    rec = fold.get("server:deploy-config")
+    if rec:
+        try:
+            return json.loads(rec.get("text", "{}"))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return {}
+
+
+def _save_deploy_config(app_path: str, branch: str, fpm_service: str,
+                        npm_build: bool) -> None:
+    """Simpan konfigurasi deploy yang berhasil ke memory untuk sesi berikutnya."""
+    config = json.dumps({"app_path": app_path, "branch": branch,
+                         "fpm_service": fpm_service, "npm_build": npm_build})
+    _mem_append({"id": "server:deploy-config", "ns": "server", "key": "deploy-config",
+                 "text": config, "tags": ["deploy", "auto"],
+                 "created_at": _now_iso(), "pinned": True, "deleted": False})
+
+
+def _capture_deploy_fingerprint(app_path: str) -> dict:
+    """Ambil fingerprint deploy: git hash, composer.lock md5, migration count, .env line count."""
+    fp: dict = {}
+    r = _run("git rev-parse HEAD 2>/dev/null", app_path, 10)
+    if r.get("success"):
+        fp["git_hash"] = r["stdout"].strip()
+    r = _run("md5sum composer.lock 2>/dev/null | awk '{print $1}'", app_path, 10)
+    if r.get("success") and r["stdout"].strip():
+        fp["composer_lock_md5"] = r["stdout"].strip()
+    r = _run("php artisan migrate:status 2>/dev/null | grep -c '| Ran'", app_path, 15)
+    if r.get("success"):
+        n = r["stdout"].strip()
+        fp["migration_count"] = int(n) if n.isdigit() else 0
+    r = _run("wc -l < .env 2>/dev/null", app_path, 10)
+    if r.get("success"):
+        n = r["stdout"].strip()
+        fp["env_lines"] = int(n) if n.isdigit() else 0
+    fp["captured_at"] = _now_iso()
+    return fp
+
+
+def _save_deploy_fingerprint(fp: dict) -> None:
+    """Simpan fingerprint deploy ke memory."""
+    _mem_append({"id": "server:deploy-fingerprint", "ns": "server",
+                 "key": "deploy-fingerprint", "text": json.dumps(fp),
+                 "tags": ["deploy", "fingerprint", "auto"],
+                 "created_at": _now_iso(), "pinned": True, "deleted": False})
+
+
+def _load_deploy_fingerprint() -> dict:
+    """Muat fingerprint deploy terakhir dari memory."""
+    fold = _mem_fold()
+    rec = fold.get("server:deploy-fingerprint")
+    if rec:
+        try:
+            return json.loads(rec.get("text", "{}"))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return {}
+
+
+def _detect_drift(app_path: str) -> dict:
+    """Bandingkan state server saat ini vs fingerprint deploy terakhir."""
+    prev = _load_deploy_fingerprint()
+    if not prev:
+        return {}
+    current = _capture_deploy_fingerprint(app_path)
+    drift: dict = {"previous": prev, "current": current, "changes": []}
+    if prev.get("git_hash") and current.get("git_hash"):
+        if prev["git_hash"] != current["git_hash"]:
+            drift["changes"].append(
+                f"Git HEAD berubah: {prev['git_hash'][:8]} → {current['git_hash'][:8]}")
+    if prev.get("composer_lock_md5") and current.get("composer_lock_md5"):
+        if prev["composer_lock_md5"] != current["composer_lock_md5"]:
+            drift["changes"].append("composer.lock berubah (dependency di-update di luar deploy)")
+    if prev.get("migration_count") is not None and current.get("migration_count") is not None:
+        diff = current["migration_count"] - prev["migration_count"]
+        if diff > 0:
+            drift["changes"].append(f"+{diff} migrasi baru sejak deploy terakhir")
+        elif diff < 0:
+            drift["changes"].append(f"Migrasi berkurang {abs(diff)} (rollback?)")
+    if prev.get("env_lines") is not None and current.get("env_lines") is not None:
+        diff = current["env_lines"] - prev["env_lines"]
+        if diff != 0:
+            drift["changes"].append(
+                f".env berubah ({prev['env_lines']} → {current['env_lines']} baris)")
+    drift["has_drift"] = len(drift["changes"]) > 0
+    return drift
+
+
 def _preflight_deploy(app_path: str) -> tuple[dict, list[str]]:
     """Cek prasyarat sebelum deploy. Return (checks, blockers).
     Jika blockers tidak kosong, deploy dibatalkan dengan laporan."""
@@ -1178,6 +1410,12 @@ def _preflight_deploy(app_path: str) -> tuple[dict, list[str]]:
     r = _run("php -r 'echo phpversion();' 2>/dev/null", None, 10)
     if r.get("success"):
         checks["php_version"] = r["stdout"].strip()
+    try:
+        drift = _detect_drift(app_path)
+        if drift.get("has_drift"):
+            checks["drift"] = drift
+    except Exception:
+        log.debug("drift detection gagal", exc_info=True)
     return checks, blockers
 
 
@@ -1203,6 +1441,11 @@ def laravel_deploy(app_path: str, branch: str = "main", composer: bool = True,
     block = _mode_gate("laravel_deploy")
     if block:
         return block
+    # Isi parameter kosong dari config deploy terakhir (jika ada di memory).
+    defaults = _load_deploy_defaults()
+    if defaults:
+        if not fpm_service and defaults.get("fpm_service"):
+            fpm_service = defaults["fpm_service"]
     if not re.fullmatch(r"[A-Za-z0-9._/-]+", branch):
         return {"success": False, "failed_steps": ["validation"],
                 "app_path": app_path, "branch": branch, "steps": [],
@@ -1251,6 +1494,16 @@ def laravel_deploy(app_path: str, branch: str = "main", composer: bool = True,
     result = {"success": len(failed) == 0, "failed_steps": failed,
               "app_path": app_path, "branch": branch,
               "preflight": preflight, "steps": steps}
+    if not failed:
+        try:
+            _save_deploy_config(app_path, branch, fpm_service, npm_build)
+            fp = _capture_deploy_fingerprint(app_path)
+            _save_deploy_fingerprint(fp)
+            result["_fingerprint"] = fp
+        except Exception:
+            log.debug("gagal simpan deploy config/fingerprint", exc_info=True)
+    if defaults:
+        result["_deploy_defaults_used"] = defaults
     _audit("laravel_deploy", f"{branch} -> {app_path} failed={failed}", result)
     _session_log("laravel_deploy", f"deploy {branch} -> {app_path}", result)
     return result
@@ -1334,6 +1587,40 @@ def session_history(last: int = 0) -> dict:
     items = _SESSION_LOG if not last else _SESSION_LOG[-max(1, last):]
     return {"success": True, "count": len(items), "total": len(_SESSION_LOG),
             "entries": items}
+
+
+@mcp.tool()
+def audit_tail(last: int = 20, tool_filter: str = "", success_only: bool = False,
+               since: str = "") -> dict:
+    """Baca N entry terakhir dari audit log (forensik lintas-sesi). Read-only.
+
+    Args:
+        last: jumlah entry terakhir (maks 100).
+        tool_filter: filter nama tool, mis. "run_command" atau "laravel_deploy".
+        success_only: True = hanya tampilkan yang berhasil.
+        since: filter temporal ISO datetime, mis. "2026-06-07T00:00:00". Hanya entry >= since.
+    """
+    if not os.path.exists(AUDIT_FILE):
+        return {"success": True, "count": 0, "entries": []}
+    entries: list[dict] = []
+    with open(AUDIT_FILE, "r", encoding="utf-8") as f:
+        for raw in f:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                rec = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if tool_filter and rec.get("tool") != tool_filter:
+                continue
+            if success_only and not rec.get("success"):
+                continue
+            if since and rec.get("ts", "") < since:
+                continue
+            entries.append(rec)
+    entries = entries[-max(1, min(int(last), 100)):]
+    return {"success": True, "count": len(entries), "entries": entries}
 
 
 @mcp.tool()
@@ -1467,6 +1754,83 @@ def rollback_plan(last: int = 5) -> dict:
         "operations": relevant,
         "note": "Perintah rollback di atas adalah SARAN. Tinjau dan sesuaikan sebelum menjalankan."
     }
+
+
+# ---------------------------------------------------------------------------
+# RUNBOOK TEMPLATES: workflow siap pakai + custom dari memory
+# ---------------------------------------------------------------------------
+_BUILTIN_TEMPLATES = {
+    "ssl-renew": {
+        "description": "Perpanjang sertifikat SSL Let's Encrypt",
+        "steps": [
+            {"label": "renew", "command": "sudo -n certbot renew", "timeout": 300},
+            {"label": "test-nginx", "command": "sudo -n nginx -t", "timeout": 30},
+            {"label": "reload-nginx", "command": "sudo -n systemctl reload nginx", "timeout": 60},
+        ],
+    },
+    "db-backup": {
+        "description": "Backup database MySQL/MariaDB",
+        "steps": [
+            {"label": "dump", "command": "mysqldump --single-transaction --no-tablespaces {db} > /var/backups/{app}/$(date +%Y%m%d_%H%M%S).sql", "timeout": 600},
+            {"label": "verify", "command": "ls -lh /var/backups/{app}/*.sql | tail -1", "timeout": 10},
+        ],
+    },
+    "log-cleanup": {
+        "description": "Bersihkan log lama untuk bebaskan disk",
+        "steps": [
+            {"label": "check-disk", "command": "df -h /", "timeout": 10},
+            {"label": "old-logs", "command": "find /var/log -name '*.gz' -mtime +30 -delete", "timeout": 60},
+            {"label": "laravel-log", "command": "truncate -s 0 {app_path}/storage/logs/laravel.log", "timeout": 10},
+            {"label": "verify-disk", "command": "df -h /", "timeout": 10},
+        ],
+    },
+    "health-check": {
+        "description": "Cek kesehatan dasar server (disk, memory, service)",
+        "steps": [
+            {"label": "disk", "command": "df -h /", "timeout": 10},
+            {"label": "memory", "command": "free -h", "timeout": 10},
+            {"label": "nginx", "command": "systemctl is-active nginx", "timeout": 10, "continue_on_fail": True},
+            {"label": "mysql", "command": "systemctl is-active mysql", "timeout": 10, "continue_on_fail": True},
+            {"label": "php-fpm", "command": "systemctl list-units --type=service --state=running | grep php.*fpm || echo 'no fpm'", "timeout": 10, "continue_on_fail": True},
+        ],
+    },
+}
+
+
+@mcp.tool()
+def runbook_templates(name: str = "") -> dict:
+    """Lihat template runbook bawaan + custom dari memory. Tanpa argumen = daftar semua.
+    Dengan nama = detail template (langsung bisa dipakai di tool runbook).
+
+    Template custom disimpan di memory (ns=server, key=runbook-<nama>). Claude bisa
+    membuat runbook lalu menyimpannya sebagai template via memory_write.
+
+    Args:
+        name: nama template, mis. "ssl-renew". Kosong = daftar semua.
+    """
+    custom: dict = {}
+    try:
+        fold = _mem_fold()
+        for rid, rec in fold.items():
+            if rid.startswith("server:runbook-") and rec.get("text"):
+                tname = rid.replace("server:runbook-", "", 1)
+                try:
+                    custom[tname] = json.loads(rec["text"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+    except Exception:
+        pass
+    all_templates = {**_BUILTIN_TEMPLATES, **custom}
+    if not name:
+        listing = {k: v.get("description", "") for k, v in all_templates.items()}
+        return {"success": True, "templates": listing,
+                "builtin": list(_BUILTIN_TEMPLATES.keys()),
+                "custom": list(custom.keys())}
+    tpl = all_templates.get(name)
+    if not tpl:
+        return {"success": False, "error": f"Template '{name}' tidak ada. "
+                f"Pilihan: {sorted(all_templates.keys())}"}
+    return {"success": True, "name": name, **tpl}
 
 
 # ---------------------------------------------------------------------------
@@ -1621,6 +1985,56 @@ def memory_resource(ns: str) -> str:
         tags = f"  [{', '.join(r['tags'])}]" if r.get("tags") else ""
         pin = " *" if r.get("pinned") else ""
         lines.append(f"- {head}{r.get('text', '')}{tags}{pin}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# RESOURCE: watchdog — health check ringkas untuk polling via /loop
+# ---------------------------------------------------------------------------
+_WATCHDOG_THRESHOLDS = {"disk_pct": 85, "memory_pct": 90}
+
+
+@mcp.resource("health://live")
+def health_live() -> str:
+    """Cek kesehatan ringkas: disk, memory, service status. Untuk polling via /loop."""
+    issues: list[str] = []
+    r = _run(
+        "echo '@@DISK@@'; df --output=pcent / 2>/dev/null | tail -1 || df -h / | awk 'NR==2{print $5}'; "
+        "echo '@@MEM@@'; free 2>/dev/null | awk '/^Mem:/{printf \"%.0f\", $3/$2*100}' || echo 0; "
+        "echo '@@LOAD@@'; cat /proc/loadavg 2>/dev/null | awk '{print $1}' || echo 0; "
+        "echo '@@NGINX@@'; systemctl is-active nginx 2>/dev/null || echo unknown; "
+        "echo '@@MYSQL@@'; systemctl is-active mysql 2>/dev/null || echo unknown; "
+        "echo '@@FPM@@'; systemctl list-units --type=service --state=running 2>/dev/null "
+        "| grep -o 'php[0-9.]*-fpm' | head -1 || echo none",
+        None, 15)
+    s = _parse_sections(r.get("stdout", ""))
+    dp = s.get("DISK", "0").strip().rstrip("%").strip()
+    disk_pct = int(dp) if dp.isdigit() else 0
+    mp = s.get("MEM", "0").strip()
+    mem_pct = int(mp) if mp.isdigit() else 0
+    load = s.get("LOAD", "0").strip()
+    nginx = s.get("NGINX", "unknown").strip()
+    mysql = s.get("MYSQL", "unknown").strip()
+    fpm = s.get("FPM", "none").strip()
+    if disk_pct >= _WATCHDOG_THRESHOLDS["disk_pct"]:
+        issues.append(f"DISK {disk_pct}% >= {_WATCHDOG_THRESHOLDS['disk_pct']}%")
+    if mem_pct >= _WATCHDOG_THRESHOLDS["memory_pct"]:
+        issues.append(f"MEMORY {mem_pct}% >= {_WATCHDOG_THRESHOLDS['memory_pct']}%")
+    for svc, status in [("nginx", nginx), ("mysql", mysql)]:
+        if status not in ("active", "unknown"):
+            issues.append(f"SERVICE {svc}: {status}")
+    status_str = "ANOMALI" if issues else "OK"
+    lines = [
+        f"status: {status_str}",
+        f"disk: {disk_pct}%",
+        f"memory: {mem_pct}%",
+        f"load: {load}",
+        f"nginx: {nginx}",
+        f"mysql: {mysql}",
+        f"php-fpm: {fpm}",
+    ]
+    if issues:
+        lines.append(f"issues: {'; '.join(issues)}")
     return "\n".join(lines)
 
 

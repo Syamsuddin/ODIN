@@ -20,7 +20,7 @@ Pada error apa pun -> exit 0 tanpa output (jangan memblokir karena bug guard).
 import json
 import os
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 import re
 import subprocess
 import sys
@@ -114,7 +114,9 @@ _DB_META_READ = re.compile(r"\.(tables|schema|databases|indexes|dbinfo)\b|"
 
 def _strip_quotes(s: str) -> str:
     """Kosongkan isi string ber-quote agar operator SQL (>,<,|) di dalamnya tak
-    dikira metakarakter shell saat deteksi redirect."""
+    dikira metakarakter shell saat deteksi redirect.
+    Handle juga $'...' (ANSI-C quoting) yang bisa mengandung escape sequences."""
+    s = re.sub(r"\$'[^']*'", "''", s)
     s = re.sub(r"'[^']*'", "''", s)
     s = re.sub(r'"[^"]*"', '""', s)
     return s
@@ -401,6 +403,30 @@ def _shift_tier(tier: str) -> str:
     return reverse.get(order.get(tier, 2), tier)
 
 
+_UNDO_PATTERNS = [
+    (r"\bgit\s+reset\s+--hard\b", "git reflog → git reset --hard <commit-sebelumnya>"),
+    (r"\bgit\s+clean\s+-[a-z]*f", "(file untracked hilang permanen — tak bisa undo)"),
+    (r"\bgit\s+checkout\b", "git checkout <branch-sebelumnya>"),
+    (r"\bgit\s+merge\b", "git merge --abort  atau  git reset --hard HEAD~1"),
+    (r"\bgit\s+rebase\b", "git rebase --abort  atau  git reflog → reset"),
+    (r"\bphp\s+artisan\s+migrate\b", "php artisan migrate:rollback --step=1 --force"),
+    (r"\bsystemctl\b.*\brestart\b", "systemctl restart <service> (restart ulang)"),
+    (r"\bsystemctl\b.*\bstop\b", "systemctl start <service>"),
+    (r"\bsystemctl\b.*\breload\b", "systemctl reload <service> (reload ulang)"),
+    (r"\bcomposer\b.*\b(install|update)\b", "composer install (ulangi setelah perbaiki)"),
+    (r"\brm\s", "(penghapusan file tidak bisa di-undo — cek backup)"),
+    (r"\bmv\b", "mv <tujuan> <asal> (balik manual)"),
+]
+
+
+def _undo_hint(command: str) -> str:
+    """Hasilkan saran undo dari pola perintah. Kosong jika tak ada saran."""
+    for pat, hint in _UNDO_PATTERNS:
+        if re.search(pat, command, re.I):
+            return hint
+    return ""
+
+
 def risk_card(command: str, extra: str = "", mode: str = "deploy",
               cwd: str = "") -> str:
     tier, aksi, efek, saran = assess_command(command)
@@ -415,6 +441,9 @@ def risk_card(command: str, extra: str = "", mode: str = "deploy",
     lines += [f"Aksi  : {aksi}",
               f"Efek  : {efek}",
               f"Saran : {saran}"]
+    undo = _undo_hint(command)
+    if undo:
+        lines.append(f"Undo  : {undo}")
     if mode == "production":
         lines.append("⚠️  Mode PRODUCTION — tier dinaikkan 1 level.")
     if tier == "KRITIS":
@@ -592,6 +621,12 @@ def main() -> None:
 
     if tool.endswith("rollback_plan"):
         emit("allow", "🟢 AMAN — rollback_plan hanya membaca riwayat sesi (read-only).")
+
+    if tool.endswith("audit_tail"):
+        emit("allow", "🟢 AMAN — audit_tail hanya membaca audit log (read-only).")
+
+    if tool.endswith("runbook_templates"):
+        emit("allow", "🟢 AMAN — runbook_templates hanya menampilkan daftar template (read-only).")
 
     sys.exit(0)  # tool lain: tanpa pendapat
 

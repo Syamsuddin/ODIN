@@ -4,12 +4,48 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ---
 
+## [1.2.0] — 2026-06-08
+
+### Added — Fase 1: Safety Net
+
+- **Fix `_strip_quotes()`**: handle ANSI-C quoting (`$'...'`) sebelum quote stripping biasa
+- **Test coverage masif**: dari 80 test → 485 test (10 file), mencakup seluruh subsistem
+
+### Added — Fase 2: Intelligence Core
+
+- **Command suggestions**: 15 dari 23 error pattern kini menyertakan `suggested_commands` (daftar perintah + level risiko)
+- **Error frequency tracking**: per-session `_error_counts`, flag `recurring` + `recurring_hint` saat error >= 3x
+- **Deploy config persistence**: auto-save konfigurasi deploy terakhir ke memory, auto-load sesi berikutnya
+- **Trend detection**: ring-buffer metrik (max 7 snapshot), `_compute_trend` membandingkan current vs oldest
+
+### Added — Fase 3: UX & Tooling
+
+- **`audit_tail` tool**: baca audit log dengan filter (last, tool, success, since)
+- **Risk card undo hints**: 12 `_UNDO_PATTERNS` menambahkan baris "Undo: ..." di kartu risiko
+- **`runbook_templates` tool**: 4 template builtin (ssl-renew, db-backup, log-cleanup, health-check) + custom dari memory
+
+### Added — Fase 4: Proactive Intelligence
+
+- **Deploy fingerprint & drift detection**: simpan fingerprint setelah deploy (git hash, composer.lock md5, migration count, .env lines), deteksi drift di preflight berikutnya
+- **Context window budget**: `_smart_output()` memotong stdout > 5000 char menjadi head+tail + `_output_meta`
+- **Watchdog resource `health://live`**: health check ringkas (disk, memory, load, services) untuk polling via `/loop`
+
+### Changed
+
+- `odin_agent.py`: 1632 → 2046 baris
+- `odin_guard.py`: 616 → 651 baris
+- MCP tools: 15 → 17
+- MCP resources: 1 → 2
+- Test: 80 → 485 (10 files, 3545 baris)
+
+---
+
 ## [1.1.0] — 2026-06-07
 
 ### Added
 
 - **Slash sub-commands**: 6 sub-command `/odin:help`, `/odin:about`, `/odin:status`, `/odin:doctor`, `/odin:check-update`, `/odin:setup`
-- `/odin:about` — penjelasan fitur ODIN (15 tools, 4 lapis keamanan, cara pakai)
+- `/odin:about` — penjelasan fitur ODIN (17 tools, 4 lapis keamanan, cara pakai)
 - `/odin:status` — quick status server (disk, memory, uptime, services) + load memory
 - `/odin:doctor` — diagnostik 5 langkah (file lokal, config MCP, guard hook, SSH, MCP server)
 - `/odin:check-update` — cek versi terbaru via `update_checker.py` atau git fetch

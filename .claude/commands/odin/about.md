@@ -4,28 +4,32 @@ Saat user menjalankan /odin:about, tampilkan teks berikut PERSIS (jangan ubah fo
 
 ODIN adalah jembatan dari Claude Code (otak di laptop) ke server Linux (tangan di VPS). Cukup bicara bahasa manusia ke Claude — ODIN yang mengeksekusi perintah di server, menganalisis output, dan mengulangi sampai selesai. Dua file Python, satu dependensi (`mcp[cli]`), nol daemon.
 
-### 15 Tools MCP
+### 17 Tools MCP + 2 Resources
 
 **Eksekusi & Inspeksi**
 - `run_command` — jalankan shell command di server (dengan klasifikasi READ/WRITE)
 - `service_action` — kelola systemd service (status/restart/reload/start/stop)
-- `laravel_deploy` — deploy Laravel one-button dengan pre-flight checks
+- `laravel_deploy` — deploy Laravel one-button dengan pre-flight + drift detection
 - `run_tests` — jalankan PHPUnit/Pest test suite
 - `tail_log` — baca log file (nginx, Laravel, syslog, dll)
 - `http_health_check` — cek HTTP status endpoint
 - `server_info` — ringkasan server (OS, disk, memory, PHP, dll)
-- `inspect_server` — inspeksi mendalam: type, stack, mode operasi
+- `inspect_server` — inspeksi mendalam: type, stack, mode operasi, trend
 
 **Workflow**
 - `runbook` — eksekusi multi-step workflow (maks 20 langkah)
+- `runbook_templates` — list/ambil template runbook builtin & custom
 - `rollback_plan` — saran rollback dari histori sesi
 - `session_history` — log semua tool yang dieksekusi sesi ini
+- `audit_tail` — baca audit log dengan filter (last, tool, success, since)
 
 **Memory**
 - `memory_write` — simpan informasi persisten (instruksi, profil server/user)
 - `memory_recall` — cari memory berdasarkan namespace/query/tag
 - `memory_forget` — hapus memory entry
 - `memory_digest` — ringkasan seluruh memory aktif
+
+**Resources**: `memory://{ns}` (baca memory per namespace), `health://live` (watchdog health check)
 
 ### Keamanan 4 Lapis
 

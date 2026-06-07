@@ -25,12 +25,14 @@ fatal() { err "$*"; exit 1; }
 banner() {
     printf "\n${BOLD}${CYAN}"
     cat <<'ART'
-    ╔═══════════════════════════════════════╗
-    ║                                       ║
-    ║     ⚡  O D I N  Installer  ⚡       ║
-    ║     MCP Agent AI for Claude Code      ║
-    ║                                       ║
-    ╚═══════════════════════════════════════╝
+    ╔══════════════════════════════════════════════════════════╗
+    ║                                                          ║
+    ║               ⚡  O D I N  Installer  ⚡               ║
+    ║               MCP Agent AI for Claude Code               ║
+    ║                                                          ║
+    ║  created by @syams_ideris (syamsuddin.ideris@gmail.com)  ║
+    ║                                                          ║
+    ╚══════════════════════════════════════════════════════════╝
 ART
     printf "${NC}\n"
 }
