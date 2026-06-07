@@ -6,7 +6,7 @@ Dipanggil oleh guard saat startup (non-blocking, background).
 Bisa juga dijalankan standalone: python3 update_checker.py
 
 Mekanisme:
-  1. Baca __version__ dari deploy_agent.py lokal.
+  1. Baca __version__ dari odin_agent.py lokal.
   2. Hit GitHub API (releases/latest atau raw __version__ dari main).
   3. Bandingkan. Tampilkan notifikasi jika ada update.
   4. Cache hasil selama CACHE_TTL_HOURS agar tidak hit API setiap sesi.
@@ -33,10 +33,10 @@ BOLD = "\033[1m"
 
 
 def _local_version() -> str:
-    """Baca __version__ dari server/deploy_agent.py lokal."""
+    """Baca __version__ dari server/odin_agent.py lokal."""
     candidates = [
-        INSTALL_DIR / "server" / "deploy_agent.py",
-        Path(__file__).resolve().parent.parent / "server" / "deploy_agent.py",
+        INSTALL_DIR / "server" / "odin_agent.py",
+        Path(__file__).resolve().parent.parent / "server" / "odin_agent.py",
     ]
     for p in candidates:
         if p.is_file():
@@ -63,7 +63,7 @@ def _remote_version() -> str | None:
 
     # Fallback: baca __version__ langsung dari main branch
     try:
-        url = f"https://raw.githubusercontent.com/{REPO}/main/server/deploy_agent.py"
+        url = f"https://raw.githubusercontent.com/{REPO}/main/server/odin_agent.py"
         req = Request(url, headers={"User-Agent": "ODIN-UpdateChecker"})
         with urlopen(req, timeout=5) as resp:
             text = resp.read().decode("utf-8", errors="ignore")

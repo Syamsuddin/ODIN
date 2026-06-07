@@ -44,7 +44,7 @@
 LAPTOP (Claude Code CLI)                    SERVER (Ubuntu VPS, user: odin)
 ┌─────────────────────────┐  SSH stdio MCP  ┌────────────────────────────────┐
 │                         │ ──────────────▶ │                                │
-│  deploy_agent_guard.py  │  spawn fresh    │  deploy_agent.py (ODIN server) │
+│  odin_guard.py  │  spawn fresh    │  odin_agent.py (ODIN server) │
 │  ├─ READ/WRITE classify │  per sesi       │  ├─ 15 MCP tools               │
 │  ├─ Risk engine (5 tier)│                 │  ├─ Output intelligence (22)   │
 │  ├─ Mode-aware tier     │                 │  ├─ Rollback tracking          │
@@ -66,10 +66,10 @@ LAPTOP (Claude Code CLI)                    SERVER (Ubuntu VPS, user: odin)
 ```
 ODIN/
 ├── server/
-│   ├── deploy_agent.py    # MCP server ODIN (1578 baris) — jalan di VPS
+│   ├── odin_agent.py    # MCP server ODIN (1578 baris) — jalan di VPS
 │   └── run.sh             # Launcher: set env + exec venv python
 ├── client/
-│   ├── deploy_agent_guard.py  # Risk engine + gerbang read/write (585 baris) — jalan di laptop
+│   ├── odin_guard.py  # Risk engine + gerbang read/write (585 baris) — jalan di laptop
 │   └── update_checker.py      # Cek versi terbaru dari GitHub (155 baris)
 ├── tests/
 │   ├── test_fase3.py          # Test runbook & rollback (36 tests)
@@ -139,7 +139,7 @@ ODIN/
 ## Model Keamanan — 4 Lapis Defense-in-Depth
 
 ```
-Lapis 1: READ/WRITE Classifier (client — deploy_agent_guard.py)
+Lapis 1: READ/WRITE Classifier (client — odin_guard.py)
          23 sub-command classifier (git, docker, mysql, npm, curl, ufw, nginx, ...)
          READ → auto-approve    WRITE → lanjut ke lapis 2
               ↓
@@ -263,7 +263,7 @@ Installer terintegrasi menangani **laptop + server** dalam satu langkah:
 - Cek Python 3 dan `python3-venv` di server
 - Buat user `odin` jika belum ada
 - Buat venv + install `mcp[cli]`
-- Upload `deploy_agent.py` dan generate `run.sh` dengan config yang benar
+- Upload `odin_agent.py` dan generate `run.sh` dengan config yang benar
 - Set password user `odin`
 - Verifikasi semua file terpasang
 
@@ -295,11 +295,11 @@ python3 -m venv /home/odin/.venv
 /home/odin/.venv/bin/pip install "mcp[cli]"
 
 # Salin file dari laptop
-scp ~/.odin/server/deploy_agent.py  <host>:/home/odin/
+scp ~/.odin/server/odin_agent.py  <host>:/home/odin/
 scp ~/.odin/server/run.sh           <host>:/home/odin/
 
 # Set permissions
-chmod 600 /home/odin/deploy_agent.py
+chmod 600 /home/odin/odin_agent.py
 chmod 755 /home/odin/run.sh
 chown -R odin:odin /home/odin/
 ```
@@ -343,7 +343,7 @@ Guard hook (`.claude/settings.json`):
         "hooks": [
           {
             "type": "command",
-            "command": "python3 '<path-to>/deploy_agent_guard.py'",
+            "command": "python3 '<path-to>/odin_guard.py'",
             "timeout": 10
           }
         ]
@@ -418,8 +418,8 @@ Total waktu: < 2 menit. Intervensi user: 1x approve restart MySQL.
 
 ```bash
 python3 -m pytest tests/ -v          # full test suite (80 tests)
-python3 -m py_compile server/deploy_agent.py
-python3 -m py_compile client/deploy_agent_guard.py
+python3 -m py_compile server/odin_agent.py
+python3 -m py_compile client/odin_guard.py
 ```
 
 ---

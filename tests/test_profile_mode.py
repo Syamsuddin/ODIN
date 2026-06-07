@@ -22,11 +22,11 @@ sys.modules["mcp.server.fastmcp"] = _mcp_fmcp
 
 ROOT = Path(__file__).resolve().parent.parent
 import importlib.util
-spec = importlib.util.spec_from_file_location("deploy_agent", ROOT / "server" / "deploy_agent.py")
+spec = importlib.util.spec_from_file_location("odin_agent", ROOT / "server" / "odin_agent.py")
 da = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(da)
 
-guard_spec = importlib.util.spec_from_file_location("guard", ROOT / "client" / "deploy_agent_guard.py")
+guard_spec = importlib.util.spec_from_file_location("guard", ROOT / "client" / "odin_guard.py")
 guard = importlib.util.module_from_spec(guard_spec)
 guard_spec.loader.exec_module(guard)
 

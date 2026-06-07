@@ -6,4 +6,4 @@ export ALLOWED_LOG_DIRS=/var/log,/var/www
 # tak ikut `git reset --hard` saat deploy). Folder dibuat otomatis (perm 700).
 export MEMORY_DIR=/home/odin/memory
 cd "$PROJECT_ROOT" || { echo "FATAL: $PROJECT_ROOT tidak bisa diakses" >&2; exit 1; }
-exec /home/odin/.venv/bin/python /home/odin/deploy_agent.py
+exec /home/odin/.venv/bin/python /home/odin/odin_agent.py

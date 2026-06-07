@@ -171,12 +171,12 @@ if [[ "$do_server" =~ ^[Yy]$ ]]; then
     if [ -n "$server_host" ]; then
         info "Menghubungi $server_host..."
         if ssh -o ConnectTimeout=10 "$server_host" \
-            "rm -rf /home/odin/deploy_agent.py /home/odin/run.sh /home/odin/.venv /home/odin/memory" 2>/dev/null; then
+            "rm -rf /home/odin/odin_agent.py /home/odin/run.sh /home/odin/.venv /home/odin/memory" 2>/dev/null; then
             ok "File ODIN di server dihapus"
             printf "    ${YELLOW}⚠${NC} User odin masih ada — hapus manual: ${CYAN}sudo userdel -r odin${NC}\n"
         else
             warn "Gagal menghapus — hapus manual di server:"
-            printf "    ${CYAN}rm -rf /home/odin/deploy_agent.py /home/odin/run.sh /home/odin/.venv /home/odin/memory${NC}\n"
+            printf "    ${CYAN}rm -rf /home/odin/odin_agent.py /home/odin/run.sh /home/odin/.venv /home/odin/memory${NC}\n"
         fi
     fi
 fi

@@ -22,7 +22,7 @@ function Show-Banner {
     Write-Host "    ╔═══════════════════════════════════════╗" -ForegroundColor Cyan
     Write-Host "    ║                                       ║" -ForegroundColor Cyan
     Write-Host "    ║     ⚡  O D I N  Installer  ⚡       ║" -ForegroundColor Cyan
-    Write-Host "    ║     MCP Deploy Agent for Claude Code  ║" -ForegroundColor Cyan
+    Write-Host "    ║     MCP Agent AI for Claude Code      ║" -ForegroundColor Cyan
     Write-Host "    ║                                       ║" -ForegroundColor Cyan
     Write-Host "    ╚═══════════════════════════════════════╝" -ForegroundColor Cyan
     Write-Host ""
@@ -111,7 +111,7 @@ git reset --hard origin/main --quiet 2>$null
 if (Test-Path ".venv\Scripts\pip.exe") {
     & .venv\Scripts\pip.exe install --quiet -r requirements.txt
 }
-$ver = (Select-String -Path "server\deploy_agent.py" -Pattern '__version__\s*=\s*"(.+)"' | ForEach-Object { $_.Matches.Groups[1].Value })
+$ver = (Select-String -Path "server\odin_agent.py" -Pattern '__version__\s*=\s*"(.+)"' | ForEach-Object { $_.Matches.Groups[1].Value })
 Write-Host "  ✓ " -ForegroundColor Green -NoNewline; Write-Host "ODIN diperbarui ke v$ver"
 '@ | Set-Content -Path $updater -Encoding UTF8
 
@@ -127,8 +127,8 @@ Write-Host "  ✓ " -ForegroundColor Green -NoNewline; Write-Host "ODIN diperbar
 
 # ── Panduan konfigurasi ────────────────────────────────────────────────────
 function Show-ConfigGuide {
-    $guardPath = "$InstallDir\client\deploy_agent_guard.py"
-    $ver = (Select-String -Path "$InstallDir\server\deploy_agent.py" -Pattern '__version__\s*=\s*"(.+)"' |
+    $guardPath = "$InstallDir\client\odin_guard.py"
+    $ver = (Select-String -Path "$InstallDir\server\odin_agent.py" -Pattern '__version__\s*=\s*"(.+)"' |
             ForEach-Object { $_.Matches.Groups[1].Value })
 
     Write-Host ""
@@ -144,7 +144,7 @@ function Show-ConfigGuide {
 
     Write-Host "`n  1." -ForegroundColor Yellow -NoNewline
     Write-Host " Setup server (di VPS):" -ForegroundColor White
-    Write-Host "     scp $InstallDir\server\deploy_agent.py  odin@server:/home/odin/"
+    Write-Host "     scp $InstallDir\server\odin_agent.py  odin@server:/home/odin/"
     Write-Host "     scp $InstallDir\server\run.sh            odin@server:/home/odin/"
     Write-Host ""
     Write-Host "     Di server, buat venv & install dependensi:"

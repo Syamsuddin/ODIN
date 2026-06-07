@@ -11,7 +11,7 @@ Model keamanan (sesuai niat user — akses penuh ke server live, keputusan akhir
 KARTU RISIKO yang dikembalikan ke prompt konfirmasi berisi:
   RISIKO (tier) · Aksi (apa yang dilakukan) · Efek (blast-radius) · Saran (rekomendasi).
 Tujuannya: user dapat menilai cepat lalu memutuskan. Hook = gerbang UX; batas keamanan
-sebenarnya tetap hak OS user `deploy` + sudoers + hard-block `_DANGER_RE` di server.
+sebenarnya tetap hak OS user `odin` + sudoers + hard-block `_DANGER_RE` di server.
 
 Baca JSON dari stdin, klasifikasikan run_command / service_action, kembalikan
 permissionDecision + reason (kartu risiko). Tool lain: tak berpendapat (fall-through).

@@ -10,7 +10,7 @@ Saat user menjalankan /odin, tampilkan teks berikut PERSIS sebagai code block (j
    ╚═════╝ ╚═════╝ ╚═╝╚═╝  ╚═══╝
 
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  ⚡ MCP Deploy Agent for Claude Code v1.1
+  ⚡ MCP Agent AI for Claude Code v1.1
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   Created by Syams Ideris

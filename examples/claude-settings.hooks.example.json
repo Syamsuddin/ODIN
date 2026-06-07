@@ -17,7 +17,7 @@
         "matcher": "mcp__odin__(run_command|service_action|laravel_deploy|run_tests|runbook|inspect_server|memory_write|memory_forget)",
         "hooks": [
           { "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/deploy_agent_guard.py\"",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/odin_guard.py\"",
             "timeout": 10 }
         ]
       }

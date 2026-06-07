@@ -105,7 +105,7 @@ print('ok')
 }
 ```
 
-Dimana `<GUARD_PATH>` = `~/.odin/client/deploy_agent_guard.py` (atau path relatif dari project).
+Dimana `<GUARD_PATH>` = `~/.odin/client/odin_guard.py` (atau path relatif dari project).
 
 Jika file settings.json sudah ada, merge permissions.allow (tanpa duplikat) dan hooks.PreToolUse (replace matcher odin). Jangan timpa entry lain.
 

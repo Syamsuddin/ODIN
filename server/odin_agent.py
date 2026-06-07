@@ -48,7 +48,7 @@ SENGAJA di luar PROJECT_ROOT agar tak kena sandbox run_command dan tak ikut
 =========================================================================
 
 Pasang:  pip install "mcp[cli]"
-Jalan :  python3 deploy_agent.py     (dijalankan otomatis oleh Claude Code via MCP)
+Jalan :  python3 odin_agent.py     (dijalankan otomatis oleh Claude Code via MCP)
 """
 
 from __future__ import annotations

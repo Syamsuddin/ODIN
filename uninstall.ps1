@@ -163,7 +163,7 @@ if ($doServer -match '^[Yy]$') {
         Write-Info "Menghubungi $serverHost..."
         $sshOk = $true
         try {
-            ssh -o ConnectTimeout=10 $serverHost "rm -rf /home/odin/deploy_agent.py /home/odin/run.sh /home/odin/.venv /home/odin/memory" 2>$null
+            ssh -o ConnectTimeout=10 $serverHost "rm -rf /home/odin/odin_agent.py /home/odin/run.sh /home/odin/.venv /home/odin/memory" 2>$null
         } catch {
             $sshOk = $false
         }
@@ -172,7 +172,7 @@ if ($doServer -match '^[Yy]$') {
             Write-Warn "User odin masih ada — hapus manual: sudo userdel -r odin"
         } else {
             Write-Warn "Gagal menghapus — hapus manual di server:"
-            Write-Host "    rm -rf /home/odin/deploy_agent.py /home/odin/run.sh /home/odin/.venv /home/odin/memory" -ForegroundColor Cyan
+            Write-Host "    rm -rf /home/odin/odin_agent.py /home/odin/run.sh /home/odin/.venv /home/odin/memory" -ForegroundColor Cyan
         }
     }
 }

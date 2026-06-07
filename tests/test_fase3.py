@@ -4,7 +4,7 @@ from unittest.mock import patch, MagicMock
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Mock MCP agar deploy_agent.py bisa diimpor tanpa dependensi mcp[cli]
+# Mock MCP agar odin_agent.py bisa diimpor tanpa dependensi mcp[cli]
 # ---------------------------------------------------------------------------
 _mcp_mod = types.ModuleType("mcp")
 _mcp_srv = types.ModuleType("mcp.server")
@@ -23,11 +23,11 @@ sys.modules["mcp.server.fastmcp"] = _mcp_fmcp
 
 ROOT = Path(__file__).resolve().parent.parent
 
-spec = importlib.util.spec_from_file_location("deploy_agent", ROOT / "server" / "deploy_agent.py")
+spec = importlib.util.spec_from_file_location("odin_agent", ROOT / "server" / "odin_agent.py")
 da = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(da)
 
-guard_spec = importlib.util.spec_from_file_location("guard", ROOT / "client" / "deploy_agent_guard.py")
+guard_spec = importlib.util.spec_from_file_location("guard", ROOT / "client" / "odin_guard.py")
 guard = importlib.util.module_from_spec(guard_spec)
 guard_spec.loader.exec_module(guard)
 

@@ -28,7 +28,7 @@ banner() {
     ╔═══════════════════════════════════════╗
     ║                                       ║
     ║     ⚡  O D I N  Installer  ⚡       ║
-    ║     MCP Deploy Agent for Claude Code  ║
+    ║     MCP Agent AI for Claude Code      ║
     ║                                       ║
     ╚═══════════════════════════════════════╝
 ART
@@ -113,7 +113,7 @@ setup_venv() {
 
 install_guard_hook() {
     local hooks_dir="$INSTALL_DIR/client"
-    local guard="$hooks_dir/deploy_agent_guard.py"
+    local guard="$hooks_dir/odin_guard.py"
 
     if [ ! -f "$guard" ]; then
         fatal "Guard tidak ditemukan di $guard"
@@ -143,7 +143,7 @@ git reset --hard origin/main --quiet
 if [ -d ".venv" ]; then
     .venv/bin/pip install --quiet -r requirements.txt
 fi
-NEW_VER=$(grep -m1 '__version__' server/deploy_agent.py | cut -d'"' -f2)
+NEW_VER=$(grep -m1 '__version__' server/odin_agent.py | cut -d'"' -f2)
 printf '\033[0;32m✓\033[0m ODIN diperbarui ke v%s\n' "$NEW_VER"
 UPDATER
     chmod +x "$updater"
@@ -351,7 +351,7 @@ with open(settings_path, 'w') as f:
 # ── Setup Wizard ───────────────────────────────────────────────────────────
 setup_wizard() {
     local ssh_host="" run_path="" guard_scope="" project_path="" settings_path=""
-    local guard_path="$INSTALL_DIR/client/deploy_agent_guard.py"
+    local guard_path="$INSTALL_DIR/client/odin_guard.py"
     local wizard_skipped=false
 
     printf "\n${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
@@ -499,7 +499,7 @@ setup_server() {
 
     printf "  Installer akan men-setup ODIN di server via SSH:\n"
     printf "    ${CYAN}•${NC} Membuat user ${BOLD}odin${NC} (jika belum ada)\n"
-    printf "    ${CYAN}•${NC} Upload deploy_agent.py & run.sh\n"
+    printf "    ${CYAN}•${NC} Upload odin_agent.py & run.sh\n"
     printf "    ${CYAN}•${NC} Membuat venv & install mcp[cli]\n"
     printf "    ${CYAN}•${NC} Set permissions & direktori memory\n\n"
 
@@ -531,8 +531,8 @@ setup_server() {
     printf "│  DEPLOY_MODE    : ${CYAN}%s${NC}\n" "$deploy_mode"
     printf "│\n"
     printf "│  Akan dibuat di server:\n"
-    printf "│    ${CYAN}/home/odin/deploy_agent.py${NC}  (600)\n"
-    printf "│    ${CYAN}/home/odin/run.sh${NC}           (755)\n"
+    printf "│    ${CYAN}/home/odin/odin_agent.py${NC}  (600)\n"
+    printf "│    ${CYAN}/home/odin/run.sh${NC}         (755)\n"
     printf "│    ${CYAN}/home/odin/.venv/${NC}           (Python venv)\n"
     printf "│    ${CYAN}/home/odin/memory/${NC}          (700)\n"
     printf "│\n"
@@ -636,16 +636,16 @@ VENVEOF
     fi
     ssh_run "rm -f /tmp/odin_venv.sh" 2>/dev/null || true
 
-    # ── 6. Upload deploy_agent.py ───────────────────────────────────────
-    printf "  ${BLUE}▸${NC} Mengunggah deploy_agent.py... "
-    if ssh_upload "$INSTALL_DIR/server/deploy_agent.py" "/tmp/odin_agent.py"; then
-        ssh_run "${pp}mv /tmp/odin_agent.py /home/odin/deploy_agent.py" 2>/dev/null || true
-        ssh_run "${pp}chown odin:odin /home/odin/deploy_agent.py" 2>/dev/null || true
-        ssh_run "${pp}chmod 600 /home/odin/deploy_agent.py" 2>/dev/null || true
+    # ── 6. Upload odin_agent.py ──────────────────────────────────────────
+    printf "  ${BLUE}▸${NC} Mengunggah odin_agent.py... "
+    if ssh_upload "$INSTALL_DIR/server/odin_agent.py" "/tmp/odin_agent.py"; then
+        ssh_run "${pp}mv /tmp/odin_agent.py /home/odin/odin_agent.py" 2>/dev/null || true
+        ssh_run "${pp}chown odin:odin /home/odin/odin_agent.py" 2>/dev/null || true
+        ssh_run "${pp}chmod 600 /home/odin/odin_agent.py" 2>/dev/null || true
         printf "${GREEN}✓${NC}\n"
     else
         printf "${RED}✗${NC}\n"
-        err "  Gagal upload deploy_agent.py"
+        err "  Gagal upload odin_agent.py"
         ssh_close; trap - EXIT; SERVER_DONE=false; return
     fi
 
@@ -660,7 +660,7 @@ export PROJECT_ROOT=${project_root}
 export ALLOWED_LOG_DIRS=${log_dirs}
 export MEMORY_DIR=/home/odin/memory
 cd "\$PROJECT_ROOT" || { echo "FATAL: \$PROJECT_ROOT tidak bisa diakses" >&2; exit 1; }
-exec /home/odin/.venv/bin/python /home/odin/deploy_agent.py
+exec /home/odin/.venv/bin/python /home/odin/odin_agent.py
 RUNEOF
     if ssh_upload "$tmp_run" "/tmp/odin_run.sh"; then
         ssh_run "${pp}mv /tmp/odin_run.sh /home/odin/run.sh" 2>/dev/null || true
@@ -693,7 +693,7 @@ RUNEOF
     # ── 9. Verifikasi ───────────────────────────────────────────────────
     printf "\n  ${BLUE}▸${NC} Verifikasi... "
     local all_ok=true
-    ssh_run "test -f /home/odin/deploy_agent.py" 2>/dev/null || all_ok=false
+    ssh_run "test -f /home/odin/odin_agent.py" 2>/dev/null || all_ok=false
     ssh_run "test -f /home/odin/run.sh" 2>/dev/null || all_ok=false
     ssh_run "test -d /home/odin/.venv" 2>/dev/null || all_ok=false
     ssh_run "test -d /home/odin/memory" 2>/dev/null || all_ok=false
@@ -708,25 +708,25 @@ RUNEOF
     trap - EXIT
 
     local version
-    version=$(grep -m1 '__version__' "$INSTALL_DIR/server/deploy_agent.py" | cut -d'"' -f2)
+    version=$(grep -m1 '__version__' "$INSTALL_DIR/server/odin_agent.py" | cut -d'"' -f2)
 
     printf "\n${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
     printf "${BOLD}${GREEN}  ✓ ODIN v${version} berhasil di-setup di server!${NC}\n"
     printf "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n\n"
     printf "  File di server:\n"
-    printf "    ${CYAN}/home/odin/deploy_agent.py${NC}  (600)\n"
-    printf "    ${CYAN}/home/odin/run.sh${NC}           (755)\n"
+    printf "    ${CYAN}/home/odin/odin_agent.py${NC}  (600)\n"
+    printf "    ${CYAN}/home/odin/run.sh${NC}         (755)\n"
     printf "    ${CYAN}/home/odin/.venv/${NC}\n"
-    printf "    ${CYAN}/home/odin/memory/${NC}          (700)\n\n"
+    printf "    ${CYAN}/home/odin/memory/${NC}        (700)\n\n"
 
     SERVER_DONE=true
 }
 
 # ── Tampilkan konfigurasi yang perlu user pasang ────────────────────────────
 show_config_guide() {
-    local guard_path="$INSTALL_DIR/client/deploy_agent_guard.py"
+    local guard_path="$INSTALL_DIR/client/odin_guard.py"
     local version
-    version=$(grep -m1 '__version__' "$INSTALL_DIR/server/deploy_agent.py" | cut -d'"' -f2)
+    version=$(grep -m1 '__version__' "$INSTALL_DIR/server/odin_agent.py" | cut -d'"' -f2)
 
     printf "\n${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
     printf "${BOLD}${GREEN}  ✓ ODIN v${version} berhasil diinstall!${NC}\n"
@@ -735,13 +735,13 @@ show_config_guide() {
     printf "\n${BOLD}📁 Lokasi:${NC}\n"
     printf "   Instalasi : ${CYAN}%s${NC}\n" "$INSTALL_DIR"
     printf "   Guard     : ${CYAN}%s${NC}\n" "$guard_path"
-    printf "   Server    : ${CYAN}%s${NC}\n" "$INSTALL_DIR/server/deploy_agent.py"
+    printf "   Server    : ${CYAN}%s${NC}\n" "$INSTALL_DIR/server/odin_agent.py"
 
     printf "\n${BOLD}📋 Langkah selanjutnya:${NC}\n"
     printf "\n${YELLOW}1.${NC} ${BOLD}Setup server (di VPS):${NC}\n"
     cat <<EOF
    Salin file ke server:
-     scp ${INSTALL_DIR}/server/deploy_agent.py  odin@server:/home/odin/
+     scp ${INSTALL_DIR}/server/odin_agent.py  odin@server:/home/odin/
      scp ${INSTALL_DIR}/server/run.sh            odin@server:/home/odin/
 
    Di server, buat venv & install dependensi:
@@ -828,7 +828,7 @@ main() {
     fi
 
     local version
-    version=$(grep -m1 '__version__' "$INSTALL_DIR/server/deploy_agent.py" | cut -d'"' -f2)
+    version=$(grep -m1 '__version__' "$INSTALL_DIR/server/odin_agent.py" | cut -d'"' -f2)
 
     if [ "$WIZARD_DONE" = true ] && [ "$SERVER_DONE" = true ]; then
         printf "\n${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"

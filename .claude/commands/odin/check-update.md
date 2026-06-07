@@ -2,11 +2,11 @@ Saat user menjalankan /odin:check-update, lakukan langkah berikut:
 
 ## Langkah 1 — Ambil Versi Lokal
 
-Baca file `server/deploy_agent.py` di direktori instalasi ODIN (cek `~/.odin/server/deploy_agent.py` atau path project saat ini). Cari baris `__version__ = "..."` dan catat versinya.
+Baca file `server/odin_agent.py` di direktori instalasi ODIN (cek `~/.odin/server/odin_agent.py` atau path project saat ini). Cari baris `__version__ = "..."` dan catat versinya.
 
 Jika file tidak ditemukan, tampilkan:
 
-> ✗ File `deploy_agent.py` tidak ditemukan. Pastikan ODIN sudah terinstall.
+> ✗ File `odin_agent.py` tidak ditemukan. Pastikan ODIN sudah terinstall.
 
 Dan berhenti.
 
