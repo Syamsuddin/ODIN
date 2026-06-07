@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ODIN v0.9.0 — MCP server "tangan" untuk Claude Code.
+ODIN v1.0 — MCP server "tangan" untuk Claude Code.
 
 Otak  = Claude Code (CLI).
 Tangan = ODIN server ini. Claude Code memanggil tool di sini lewat protokol MCP (stdio),
@@ -53,7 +53,7 @@ Jalan :  python3 deploy_agent.py     (dijalankan otomatis oleh Claude Code via M
 
 from __future__ import annotations
 
-__version__ = "0.9.0"
+__version__ = "1.0.0"
 
 import fcntl
 import json

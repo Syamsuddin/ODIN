@@ -4,6 +4,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ---
 
+## [1.0.0] — 2026-06-07
+
+Rilis stabil pertama. Seluruh fitur inti lengkap, teruji (80 test), dan terdokumentasi menyeluruh. Promosi dari v0.9.0 setelah validasi arsitektur, review teknis 4 dimensi, dan analisis dampak.
+
+### Changed
+
+- **Versi**: `__version__` di kedua file Python dinaikkan dari `0.9.0` ke `1.0.0`
+- **Dokumentasi**: Seluruh file dokumentasi ditulis ulang menjadi lengkap dan informatif:
+  - `README.md` — panduan lengkap: arsitektur, 15 tools, keamanan 4 lapis, instalasi, env vars, cara kerja end-to-end
+  - `CLAUDE.md` — project instructions diperkaya: detail per-tool approval, 23 sub-classifiers, memory system, semua subsistem
+  - `EXECUTIVE_SUMMARY.md` — rangkuman eksekutif dengan alur interaksi penuh (User → Claude → Guard → Server → VPS)
+  - `REVIEW_EMPAT_FAKTOR.md` — review teknis 4 dimensi (kompleksitas, kemudahan, kepintaran, keamanan)
+  - `docs/MEMORY_NOTES.md` — dokumentasi sistem memory dengan detail storage, fold, compaction, safety
+
+### Summary Fitur v1.0
+
+Berikut seluruh kapabilitas yang tersedia di ODIN v1.0:
+
+**15 MCP Tools**: `run_command`, `tail_log`, `service_action`, `laravel_deploy`, `run_tests`, `http_health_check`, `server_info`, `inspect_server`, `session_history`, `runbook`, `rollback_plan`, `memory_write`, `memory_recall`, `memory_forget`, `memory_digest`
+
+**1 MCP Resource**: `memory://{ns}`
+
+**Keamanan 4 Lapis**: READ/WRITE classifier (23 sub-command classifiers) → Risk engine (26 shell rules + DB assessor, 5 tier) → Hard-block katastrofik (`_DANGER_RE`) → OS user permissions
+
+**Kecerdasan**: Output intelligence (22 error patterns), rollback tracking, runbook engine (maks 20 step), pre-flight deploy checks, server profiler + auto-mode (setup/deploy/production)
+
+**Memory**: Append-only JSONL, 3 namespace (server/instruction/profile), fold + TTL + tombstone + compaction, secret guard, auto-inject ke konteks tiap sesi
+
+**Audit**: Append-only `audit.jsonl`, setiap tool execution tercatat
+
+**Installer**: `install.sh` (macOS & Linux) + `uninstall.sh` + `odin-update` command
+
+**Metrik**: 2318 baris source + 758 baris test = 3076 total. 1 dependensi (`mcp[cli]`). 80 automated tests.
+
+---
+
 ## [0.9.0] — 2026-06-06
 
 Rilis pertama dengan nama ODIN. Seluruh fitur inti lengkap dan teruji (80 test).
@@ -67,12 +103,17 @@ Rilis pertama dengan nama ODIN. Seluruh fitur inti lengkap dan teruji (80 test).
 
 - **Security Model** (Fase 0-1)
   - PreToolUse guard with READ/WRITE classifier (`seg_is_read`)
-  - 20+ sub-command classifiers (git, docker, mysql, npm, curl, ufw, nginx, etc.)
+  - 23 sub-command classifiers (git, docker, mysql, npm, curl, ufw, nginx, etc.)
   - Risk engine: 5-tier cards (AMAN/RENDAH/SEDANG/TINGGI/KRITIS) + 26 shell rules
   - `_DANGER_RE` hard-block for catastrophic commands (server-side)
   - Command substitution (`$()`, backticks) detection — forces "ask"
   - DB read/write classification (SELECT/SHOW → allow, DML/DDL → ask)
   - Production mode: tier shift +1, `MODE PRODUCTION` warning on risk cards
+
+- **Installer**
+  - `install.sh` — cross-platform installer (macOS & Linux)
+  - `uninstall.sh` — clean uninstaller
+  - `odin-update` command via symlink
 
 - **Versioning**
   - `__version__` constant in both Python files
