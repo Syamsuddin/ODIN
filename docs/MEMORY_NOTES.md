@@ -22,7 +22,7 @@ karena server di-spawn fresh tiap sesi via SSH stdio).
 
 ## Storage
 
-- Append-only JSONL di `MEMORY_DIR` (default `/home/deploy/agent/memory/memory.jsonl`).
+- Append-only JSONL di `MEMORY_DIR` (default `/home/odin/memory/memory.jsonl`).
 - Fold = last-write-wins per `id` (`id = ns:slug(key)`), tombstone untuk hapus, TTL via `expires_at`.
 - Aman konkuren: `O_APPEND` + `fcntl.flock`. Compaction atomic (`temp + os.replace`) bila > `MEMORY_MAX_ENTRIES`.
 - Perm ketat: dir `700`, file `600`. **Di luar `PROJECT_ROOT`** → tak terbaca/tertimpa via `run_command`/`tail_log`, tak ikut `git reset --hard`.
@@ -36,7 +36,7 @@ karena server di-spawn fresh tiap sesi via SSH stdio).
 ## ENV (di `run.sh`)
 
 ```
-MEMORY_DIR=/home/deploy/agent/memory   # folder simpanan
+MEMORY_DIR=/home/odin/memory   # folder simpanan
 MEMORY_MAX_TEXT=4000                    # panjang maks teks/entry
 MEMORY_MAX_ENTRIES=2000                 # ambang compaction
 ```
@@ -44,7 +44,7 @@ MEMORY_MAX_ENTRIES=2000                 # ambang compaction
 ## Cara pasang ke server (jalur version-control, BUKAN edit liar di produksi)
 
 1. Review file ini + `deploy_agent.py` di lokal.
-2. Salin ke server: `deploy_agent.py` → `/home/deploy/agent/`, `run.sh` → `/home/deploy/agent/run.sh`.
+2. Salin ke server: `deploy_agent.py` → `/home/odin/`, `run.sh` → `/home/odin/run.sh`.
 3. Restart sesi MCP (reconnect) agar tool terdaftar & memory ter-load.
 4. Seed awal (opsional), via tool `memory_write`:
    - `profile/owner`: "Syams — admin SIMURU"

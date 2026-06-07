@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ODIN v0.9.0 — PreToolUse guard + RISK ENGINE untuk MCP ODIN.
+ODIN v1.0.0 — PreToolUse guard + RISK ENGINE untuk MCP ODIN.
 
 Model keamanan (sesuai niat user — akses penuh ke server live, keputusan akhir di user):
   - Perintah READ  (inspeksi file/sistem & kueri baca DB: SELECT/SHOW/DESCRIBE) -> allow

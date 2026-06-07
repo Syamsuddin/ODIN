@@ -507,7 +507,7 @@ Disk usage untuk memory          →   Sedikit naik (+trend history, +fingerprin
 Network (SSH overhead)           →   Berkurang (fewer subprocess = fewer SSH calls)
 
 TIDAK ADA PERUBAHAN di:
-  OS permissions, sudoers, user deploy
+  OS permissions, sudoers, user odin
   Systemd units, service configs
   File permissions, directory structure
   Kecuali D6: perlu port baru + systemd unit (OPSIONAL)

@@ -387,7 +387,7 @@ setup_wizard() {
     ssh_host=$(ask_input "SSH host" "$ssh_host")
     printf "│\n"
     printf "│  Path run.sh di server\n"
-    run_path=$(ask_input "Path run.sh" "${run_path:-/home/deploy/agent/run.sh}")
+    run_path=$(ask_input "Path run.sh" "${run_path:-/home/odin/run.sh}")
     printf "│\n"
     test_ssh "$ssh_host" "$run_path"
     printf "│\n└──────────────────────────────────────────────────────\n\n"
@@ -451,6 +451,277 @@ setup_wizard() {
     WIZARD_DONE=true
 }
 
+# ── SSH ControlMaster ──────────────────────────────────────────────────────
+SSH_CTRL_SOCK=""
+SSH_CTRL_HOST=""
+
+ssh_open() {
+    local host="$1"
+    SSH_CTRL_HOST="$host"
+    SSH_CTRL_SOCK="/tmp/odin-ssh-$$"
+    printf "  ${BLUE}▸${NC} Membuka koneksi SSH ke ${CYAN}%s${NC}...\n" "$host"
+    printf "    ${YELLOW}(Masukkan password jika diminta — hanya 1x untuk seluruh proses)${NC}\n"
+    ssh -o ControlMaster=yes -o ControlPath="$SSH_CTRL_SOCK" \
+        -o ControlPersist=300 -o ConnectTimeout=10 \
+        -o ServerAliveInterval=30 \
+        -fN "$host" || return 1
+    ok "  Koneksi SSH berhasil (ControlMaster aktif)"
+    return 0
+}
+
+ssh_run() {
+    ssh -o ControlPath="$SSH_CTRL_SOCK" "$SSH_CTRL_HOST" "$@"
+}
+
+ssh_run_tty() {
+    ssh -t -o ControlPath="$SSH_CTRL_SOCK" "$SSH_CTRL_HOST" "$@"
+}
+
+ssh_upload() {
+    scp -q -o ControlPath="$SSH_CTRL_SOCK" "$1" "${SSH_CTRL_HOST}:$2"
+}
+
+ssh_close() {
+    if [ -n "$SSH_CTRL_SOCK" ]; then
+        ssh -o ControlPath="$SSH_CTRL_SOCK" -O exit "$SSH_CTRL_HOST" 2>/dev/null || true
+        SSH_CTRL_SOCK=""
+        SSH_CTRL_HOST=""
+    fi
+}
+
+# ── Server Setup ───────────────────────────────────────────────────────────
+setup_server() {
+    local admin_host="" project_root="" log_dirs="" deploy_mode=""
+
+    printf "\n${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    printf "${BOLD}${CYAN}  Setup Server — Push via SSH${NC}\n"
+    printf "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n\n"
+
+    printf "  Installer akan men-setup ODIN di server via SSH:\n"
+    printf "    ${CYAN}•${NC} Membuat user ${BOLD}odin${NC} (jika belum ada)\n"
+    printf "    ${CYAN}•${NC} Upload deploy_agent.py & run.sh\n"
+    printf "    ${CYAN}•${NC} Membuat venv & install mcp[cli]\n"
+    printf "    ${CYAN}•${NC} Set permissions & direktori memory\n\n"
+
+    # ── Input: Koneksi ──────────────────────────────────────────────────
+    printf "┌─ ${BOLD}Koneksi Admin${NC} ──────────────────────────────────────\n│\n"
+    printf "│  SSH user dengan akses root/sudo di server\n│\n"
+    admin_host=$(ask_input "SSH user@host" "root@")
+    printf "│\n└──────────────────────────────────────────────────────\n\n"
+
+    # ── Input: Konfigurasi ──────────────────────────────────────────────
+    printf "┌─ ${BOLD}Konfigurasi Aplikasi${NC} ──────────────────────────────\n│\n"
+    printf "│  Path root aplikasi web di server\n│\n"
+    project_root=$(ask_input "PROJECT_ROOT" "/var/www/html")
+    printf "│\n│  Direktori log yang boleh dibaca (pisah koma)\n│\n"
+    log_dirs=$(ask_input "ALLOWED_LOG_DIRS" "/var/log,/var/www")
+    printf "│\n│  Mode operasi:\n│\n"
+    printf "│  ${CYAN}1)${NC} local — project sudah ada di server\n"
+    printf "│  ${CYAN}2)${NC} git   — deploy via git pull\n│\n"
+    local mode_choice
+    mode_choice=$(ask_choice "Pilihan" 2 "1")
+    [ "$mode_choice" = "2" ] && deploy_mode="git" || deploy_mode="local"
+    printf "│\n└──────────────────────────────────────────────────────\n\n"
+
+    # ── Konfirmasi ──────────────────────────────────────────────────────
+    printf "┌─ ${BOLD}Ringkasan${NC} ──────────────────────────────────────────\n│\n"
+    printf "│  Admin SSH      : ${CYAN}%s${NC}\n" "$admin_host"
+    printf "│  PROJECT_ROOT   : ${CYAN}%s${NC}\n" "$project_root"
+    printf "│  LOG_DIRS       : ${CYAN}%s${NC}\n" "$log_dirs"
+    printf "│  DEPLOY_MODE    : ${CYAN}%s${NC}\n" "$deploy_mode"
+    printf "│\n"
+    printf "│  Akan dibuat di server:\n"
+    printf "│    ${CYAN}/home/odin/deploy_agent.py${NC}  (600)\n"
+    printf "│    ${CYAN}/home/odin/run.sh${NC}           (755)\n"
+    printf "│    ${CYAN}/home/odin/.venv/${NC}           (Python venv)\n"
+    printf "│    ${CYAN}/home/odin/memory/${NC}          (700)\n"
+    printf "│\n"
+    printf "${BOLD}│  Lanjutkan? [Y/n]${NC}: "
+    local confirm
+    read -r confirm
+    if [[ "$confirm" =~ ^[Nn]$ ]]; then
+        info "Setup server dibatalkan."
+        printf "│\n└──────────────────────────────────────────────────────\n\n"
+        SERVER_DONE=false
+        return
+    fi
+    printf "│\n└──────────────────────────────────────────────────────\n\n"
+
+    # ── Buka koneksi SSH (satu kali password) ───────────────────────────
+    if ! ssh_open "$admin_host"; then
+        err "Gagal koneksi SSH — periksa host, user, dan password."
+        SERVER_DONE=false
+        return
+    fi
+    trap 'ssh_close' EXIT
+
+    # ── Detect privileges ───────────────────────────────────────────────
+    local pp=""
+    local remote_user
+    remote_user=$(ssh_run "whoami" 2>/dev/null) || remote_user="unknown"
+    if [ "$remote_user" = "root" ]; then
+        ok "  Terhubung sebagai root"
+    else
+        pp="sudo "
+        info "  Terhubung sebagai $remote_user — menggunakan sudo"
+    fi
+
+    # ── 1. Python ───────────────────────────────────────────────────────
+    printf "  ${BLUE}▸${NC} Memeriksa Python... "
+    local srv_py
+    if srv_py=$(ssh_run "python3 --version" 2>&1); then
+        printf "${GREEN}✓${NC} %s\n" "$srv_py"
+    else
+        printf "${RED}✗${NC}\n"
+        err "  Python 3 tidak ditemukan. Install: ${CYAN}apt install python3 python3-venv${NC}"
+        ssh_close; trap - EXIT; SERVER_DONE=false; return
+    fi
+
+    # ── 2. python3-venv ─────────────────────────────────────────────────
+    if ! ssh_run "python3 -c 'import venv'" >/dev/null 2>&1; then
+        printf "  ${BLUE}▸${NC} Installing python3-venv... "
+        if ssh_run "${pp}apt-get install -y -qq python3-venv" >/dev/null 2>&1; then
+            printf "${GREEN}✓${NC}\n"
+        else
+            printf "${YELLOW}⚠${NC}\n"
+            warn "  Install manual: ${CYAN}apt install python3-venv${NC}"
+        fi
+    fi
+
+    # ── 3. User odin ────────────────────────────────────────────────────
+    printf "  ${BLUE}▸${NC} Memeriksa user odin... "
+    if ssh_run "id odin" >/dev/null 2>&1; then
+        printf "${GREEN}✓${NC} sudah ada\n"
+    else
+        printf "${YELLOW}membuat${NC}... "
+        if ssh_run "${pp}useradd -m -s /bin/bash odin" 2>/dev/null; then
+            printf "${GREEN}✓${NC}\n"
+        else
+            printf "${RED}✗${NC}\n"
+            err "  Gagal membuat user odin"
+            ssh_close; trap - EXIT; SERVER_DONE=false; return
+        fi
+    fi
+
+    # ── 4. Direktori ────────────────────────────────────────────────────
+    printf "  ${BLUE}▸${NC} Membuat direktori... "
+    ssh_run "${pp}mkdir -p /home/odin/memory" 2>/dev/null || true
+    ssh_run "${pp}chown -R odin:odin /home/odin" 2>/dev/null || true
+    ssh_run "${pp}chmod 700 /home/odin/memory" 2>/dev/null || true
+    printf "${GREEN}✓${NC}\n"
+
+    # ── 5. Venv & mcp[cli] ──────────────────────────────────────────────
+    printf "  ${BLUE}▸${NC} Membuat venv & install mcp[cli]...\n"
+    printf "    ${YELLOW}(bisa memakan waktu 1-2 menit)${NC}\n"
+
+    ssh_run "cat > /tmp/odin_venv.sh && chmod +x /tmp/odin_venv.sh" <<'VENVEOF'
+#!/bin/bash
+set -e
+python3 -m venv /home/odin/.venv
+/home/odin/.venv/bin/pip install --quiet --upgrade pip
+/home/odin/.venv/bin/pip install --quiet "mcp[cli]"
+VENVEOF
+    ssh_run "${pp}chown odin:odin /tmp/odin_venv.sh" 2>/dev/null || true
+    local venv_out
+    if venv_out=$(ssh_run "${pp}su - odin -c '/tmp/odin_venv.sh'" 2>&1); then
+        ok "    Venv & mcp[cli] terinstall"
+    else
+        err "    Gagal install venv/mcp[cli]"
+        [ -n "$venv_out" ] && printf "    %s\n" "$venv_out"
+        warn "  Cek koneksi internet server, lalu coba manual:"
+        printf "    ${CYAN}su - odin -c 'python3 -m venv /home/odin/.venv'${NC}\n"
+        printf "    ${CYAN}su - odin -c '/home/odin/.venv/bin/pip install \"mcp[cli]\"'${NC}\n"
+        ssh_run "rm -f /tmp/odin_venv.sh" 2>/dev/null || true
+        ssh_close; trap - EXIT; SERVER_DONE=false; return
+    fi
+    ssh_run "rm -f /tmp/odin_venv.sh" 2>/dev/null || true
+
+    # ── 6. Upload deploy_agent.py ───────────────────────────────────────
+    printf "  ${BLUE}▸${NC} Mengunggah deploy_agent.py... "
+    if ssh_upload "$INSTALL_DIR/server/deploy_agent.py" "/tmp/odin_agent.py"; then
+        ssh_run "${pp}mv /tmp/odin_agent.py /home/odin/deploy_agent.py" 2>/dev/null || true
+        ssh_run "${pp}chown odin:odin /home/odin/deploy_agent.py" 2>/dev/null || true
+        ssh_run "${pp}chmod 600 /home/odin/deploy_agent.py" 2>/dev/null || true
+        printf "${GREEN}✓${NC}\n"
+    else
+        printf "${RED}✗${NC}\n"
+        err "  Gagal upload deploy_agent.py"
+        ssh_close; trap - EXIT; SERVER_DONE=false; return
+    fi
+
+    # ── 7. Generate & upload run.sh ─────────────────────────────────────
+    printf "  ${BLUE}▸${NC} Menulis run.sh... "
+    local tmp_run
+    tmp_run=$(mktemp)
+    cat > "$tmp_run" <<RUNEOF
+#!/usr/bin/env bash
+export DEPLOY_MODE=${deploy_mode}
+export PROJECT_ROOT=${project_root}
+export ALLOWED_LOG_DIRS=${log_dirs}
+export MEMORY_DIR=/home/odin/memory
+cd "\$PROJECT_ROOT" || { echo "FATAL: \$PROJECT_ROOT tidak bisa diakses" >&2; exit 1; }
+exec /home/odin/.venv/bin/python /home/odin/deploy_agent.py
+RUNEOF
+    if ssh_upload "$tmp_run" "/tmp/odin_run.sh"; then
+        ssh_run "${pp}mv /tmp/odin_run.sh /home/odin/run.sh" 2>/dev/null || true
+        ssh_run "${pp}chown odin:odin /home/odin/run.sh" 2>/dev/null || true
+        ssh_run "${pp}chmod 755 /home/odin/run.sh" 2>/dev/null || true
+        printf "${GREEN}✓${NC}\n"
+    else
+        printf "${RED}✗${NC}\n"
+        err "  Gagal upload run.sh"
+    fi
+    rm -f "$tmp_run"
+
+    # ── 8. Password odin ────────────────────────────────────────────────
+    printf "\n  ${BOLD}Password user odin${NC}\n"
+    printf "  Claude Code terhubung ke server sebagai user odin via SSH.\n"
+    printf "  User odin perlu password untuk login SSH.\n\n"
+    printf "  ${CYAN}1)${NC} Set password sekarang (interaktif)\n"
+    printf "  ${CYAN}2)${NC} Lewati (set nanti: ${CYAN}sudo passwd odin${NC})\n\n"
+    local pw_choice
+    pw_choice=$(ask_choice "Pilihan" 2 "1")
+    if [ "$pw_choice" = "1" ]; then
+        printf "\n"
+        if ssh_run_tty "${pp}passwd odin"; then
+            ok "  Password odin di-set"
+        else
+            warn "  Gagal set password — jalankan manual di server: ${CYAN}sudo passwd odin${NC}"
+        fi
+    fi
+
+    # ── 9. Verifikasi ───────────────────────────────────────────────────
+    printf "\n  ${BLUE}▸${NC} Verifikasi... "
+    local all_ok=true
+    ssh_run "test -f /home/odin/deploy_agent.py" 2>/dev/null || all_ok=false
+    ssh_run "test -f /home/odin/run.sh" 2>/dev/null || all_ok=false
+    ssh_run "test -d /home/odin/.venv" 2>/dev/null || all_ok=false
+    ssh_run "test -d /home/odin/memory" 2>/dev/null || all_ok=false
+    if [ "$all_ok" = true ]; then
+        printf "${GREEN}✓ Semua file & direktori OK${NC}\n"
+    else
+        printf "${YELLOW}⚠ Ada yang kurang — periksa manual${NC}\n"
+    fi
+
+    # ── Selesai ─────────────────────────────────────────────────────────
+    ssh_close
+    trap - EXIT
+
+    local version
+    version=$(grep -m1 '__version__' "$INSTALL_DIR/server/deploy_agent.py" | cut -d'"' -f2)
+
+    printf "\n${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    printf "${BOLD}${GREEN}  ✓ ODIN v${version} berhasil di-setup di server!${NC}\n"
+    printf "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n\n"
+    printf "  File di server:\n"
+    printf "    ${CYAN}/home/odin/deploy_agent.py${NC}  (600)\n"
+    printf "    ${CYAN}/home/odin/run.sh${NC}           (755)\n"
+    printf "    ${CYAN}/home/odin/.venv/${NC}\n"
+    printf "    ${CYAN}/home/odin/memory/${NC}          (700)\n\n"
+
+    SERVER_DONE=true
+}
+
 # ── Tampilkan konfigurasi yang perlu user pasang ────────────────────────────
 show_config_guide() {
     local guard_path="$INSTALL_DIR/client/deploy_agent_guard.py"
@@ -470,12 +741,12 @@ show_config_guide() {
     printf "\n${YELLOW}1.${NC} ${BOLD}Setup server (di VPS):${NC}\n"
     cat <<EOF
    Salin file ke server:
-     scp ${INSTALL_DIR}/server/deploy_agent.py  user@server:/home/deploy/agent/
-     scp ${INSTALL_DIR}/server/run.sh            user@server:/home/deploy/agent/
+     scp ${INSTALL_DIR}/server/deploy_agent.py  odin@server:/home/odin/
+     scp ${INSTALL_DIR}/server/run.sh            odin@server:/home/odin/
 
    Di server, buat venv & install dependensi:
-     python3 -m venv /home/deploy/agent/.venv
-     /home/deploy/agent/.venv/bin/pip install "mcp[cli]"
+     python3 -m venv /home/odin/.venv
+     /home/odin/.venv/bin/pip install "mcp[cli]"
 EOF
 
     printf "\n${YELLOW}2.${NC} ${BOLD}Konfigurasi MCP (Claude Code):${NC}\n"
@@ -486,7 +757,7 @@ EOF
        "odin": {
          "type": "stdio",
          "command": "ssh",
-         "args": ["your-server-alias", "/home/deploy/agent/run.sh"]
+         "args": ["your-server-alias", "/home/odin/run.sh"]
        }
      }
    }
@@ -547,19 +818,37 @@ main() {
     WIZARD_DONE=false
     setup_wizard
 
-    if [ "$WIZARD_DONE" = true ]; then
-        local version
-        version=$(grep -m1 '__version__' "$INSTALL_DIR/server/deploy_agent.py" | cut -d'"' -f2)
+    SERVER_DONE=false
+    printf "\n"
+    printf "  ${BOLD}Setup ODIN di server juga via SSH? [Y/n]${NC}: "
+    local do_server
+    read -r do_server
+    if [[ ! "$do_server" =~ ^[Nn]$ ]]; then
+        setup_server
+    fi
 
+    local version
+    version=$(grep -m1 '__version__' "$INSTALL_DIR/server/deploy_agent.py" | cut -d'"' -f2)
+
+    if [ "$WIZARD_DONE" = true ] && [ "$SERVER_DONE" = true ]; then
         printf "\n${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
-        printf "${BOLD}${GREEN}  ✓ ODIN v${version} siap digunakan!${NC}\n"
+        printf "${BOLD}${GREEN}  ✓ ODIN v${version} — Laptop & Server siap!${NC}\n"
         printf "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n\n"
         printf "  Buka Claude Code dan coba:\n"
         printf "    ${CYAN}\"cek status server\"${NC}\n\n"
-        printf "  Update kapan saja:\n"
-        printf "    ${CYAN}odin-update${NC}\n\n"
-        printf "  Dokumentasi:\n"
-        printf "    ${CYAN}https://github.com/${REPO}${NC}\n\n"
+        printf "  Update:  ${CYAN}odin-update${NC}\n"
+        printf "  Docs:    ${CYAN}https://github.com/${REPO}${NC}\n\n"
+    elif [ "$WIZARD_DONE" = true ]; then
+        printf "\n${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+        printf "${BOLD}${GREEN}  ✓ ODIN v${version} — Laptop siap!${NC}\n"
+        printf "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n\n"
+        printf "  Setup server nanti: jalankan ${CYAN}install.sh${NC} lagi\n"
+        printf "  atau manual: ${CYAN}scp server/* odin@server:/home/odin/${NC}\n\n"
+        printf "  Update:  ${CYAN}odin-update${NC}\n"
+        printf "  Docs:    ${CYAN}https://github.com/${REPO}${NC}\n\n"
+    elif [ "$SERVER_DONE" = true ]; then
+        printf "\n  Laptop belum dikonfigurasi.\n"
+        show_config_guide
     else
         show_config_guide
     fi

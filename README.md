@@ -25,7 +25,7 @@ Perintah natural-language dari manusia -> Claude Code memahami intent -> ODIN me
 ## Arsitektur
 
 ```
-LAPTOP (Claude Code CLI)                    SERVER (Ubuntu VPS, user: deploy)
+LAPTOP (Claude Code CLI)                    SERVER (Ubuntu VPS, user: odin)
 ┌─────────────────────────┐  SSH stdio MCP  ┌────────────────────────────────┐
 │                         │ ──────────────▶ │                                │
 │  deploy_agent_guard.py  │  spawn fresh    │  deploy_agent.py (ODIN server) │
@@ -135,7 +135,7 @@ Lapis 3: Hard-block Katastrofik (server — _DANGER_RE)
          Ditolak kecuali allow_dangerous=True (double brake)
               ↓
 Lapis 4: OS-level (server)
-         User deploy dengan sudoers terbatas
+         User odin dengan sudoers terbatas
          Batas keamanan sesungguhnya
 ```
 
@@ -253,12 +253,12 @@ python3 -m venv .venv && .venv/bin/pip install "mcp[cli]"
 
 ```bash
 ssh <host>
-mkdir -p /home/deploy/agent && cd /home/deploy/agent
+mkdir -p /home/odin && cd /home/odin
 python3 -m venv .venv && .venv/bin/pip install "mcp[cli]"
 
 # Salin file dari laptop
-scp ~/.odin/server/deploy_agent.py  <host>:/home/deploy/agent/
-scp ~/.odin/server/run.sh           <host>:/home/deploy/agent/
+scp ~/.odin/server/deploy_agent.py  <host>:/home/odin/
+scp ~/.odin/server/run.sh           <host>:/home/odin/
 
 chmod 600 deploy_agent.py && chmod 755 run.sh
 ```
@@ -273,7 +273,7 @@ MCP server (`~/.claude.json` atau project `.claude.json`):
     "odin": {
       "type": "stdio",
       "command": "ssh",
-      "args": ["your-server-alias", "/home/deploy/agent/run.sh"]
+      "args": ["your-server-alias", "/home/odin/run.sh"]
     }
   }
 }
@@ -361,7 +361,7 @@ Total waktu: < 2 menit. Intervensi user: 1x approve restart MySQL.
 | `MAX_TIMEOUT` | `900` | Timeout maksimum (detik) |
 | `OUTPUT_LIMIT` | `20000` | Potong output panjang (karakter) |
 | `AGENT_LOG_LEVEL` | `INFO` | Level log |
-| `MEMORY_DIR` | `/home/deploy/agent/memory` | Folder simpanan memory |
+| `MEMORY_DIR` | `/home/odin/memory` | Folder simpanan memory |
 | `MEMORY_MAX_TEXT` | `4000` | Panjang maks teks satu entry |
 | `MEMORY_MAX_ENTRIES` | `2000` | Ambang compaction |
 | `AUDIT_ENABLED` | `1` | `0` = matikan audit log |
@@ -419,7 +419,7 @@ Auto-detect juga mendukung: PostgreSQL, MongoDB, Docker, Apache, Redis, Supervis
 
 ## Keamanan
 
-Batas sebenarnya = hak OS user `deploy` + sudoers. Hook + `_DANGER_RE` = jaring pengaman, bukan sandbox. Keputusan akhir selalu di operator (konfirmasi WRITE).
+Batas sebenarnya = hak OS user `odin` + sudoers. Hook + `_DANGER_RE` = jaring pengaman, bukan sandbox. Keputusan akhir selalu di operator (konfirmasi WRITE).
 
 Filosofi: READ auto-approve, WRITE wajib konfirmasi, katastrofik double-brake. Guard lebih ketat dari server (by design).
 

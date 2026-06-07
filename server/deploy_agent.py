@@ -41,7 +41,7 @@ SENGAJA di luar PROJECT_ROOT agar tak kena sandbox run_command dan tak ikut
   DEFAULT_TIMEOUT    180   MAX_TIMEOUT 900             (detik)
   OUTPUT_LIMIT       20000                            (potong output panjang)
   AGENT_LOG_LEVEL    INFO
-  MEMORY_DIR         /home/deploy/agent/memory        (folder simpanan memory)
+  MEMORY_DIR         /home/odin/memory                (folder simpanan memory)
   MEMORY_MAX_TEXT    4000                             (panjang maks teks satu entry)
   MEMORY_MAX_ENTRIES 2000                             (batas entry hidup; lebih -> compaction)
   AUDIT_ENABLED      1                                (0 = matikan audit log)

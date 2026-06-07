@@ -79,7 +79,7 @@ Yang kuat:
 - **Secret detection di memory**: password, private key, AWS key, JWT, GitHub token terdeteksi sebelum masuk JSONL
 - **Memory di luar webroot**: tidak bisa diakses via web atau `run_command` (di luar `PROJECT_ROOT`)
 - **Audit trail**: setiap eksekusi tercatat append-only — untuk forensik pasca-insiden
-- **Prinsip least privilege**: user `deploy` dengan sudoers terbatas
+- **Prinsip least privilege**: user `odin` dengan sudoers terbatas
 
 Gap nyata:
 - **Guard di sisi CLIENT**: jika Claude Code session di-hijack atau guard file di-tamper, seluruh lapisan 1-2 hilang. Server-side hanya punya `_DANGER_RE` sebagai pertahanan terakhir sebelum OS

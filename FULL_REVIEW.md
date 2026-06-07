@@ -489,7 +489,7 @@ php -r 'exec("rm -rf /");'
 
 Ini akan lolos `_DANGER_RE` karena regex cek `rm -rf /` di level shell, bukan di dalam string argumen interpreter. Guard akan classify sebagai WRITE (karena `python3` tidak ada di `READ_CMDS`) dan menampilkan risk card generic "Mengubah state (perintah tak terklasifikasi)" dengan tier SEDANG — bukan KRITIS.
 
-Mitigasi: sudoers user `deploy` membatasi apa yang benar-benar bisa dieksekusi (lapis 4).
+Mitigasi: sudoers user `odin` membatasi apa yang benar-benar bisa dieksekusi (lapis 4).
 
 **V-2: Hex/encoding bypass** (Severity: Rendah)
 
@@ -500,7 +500,7 @@ $'\x72\x6d' -rf /         # rm -rf / via hex
 $'\162\155' -rf /          # rm -rf / via octal
 ```
 
-Ini akan lolos `_DANGER_RE`. Namun bash di server akan mengekspansi escape, jadi perintah tetap tereksekusi sebagai `rm -rf /` — yang akan gagal karena user `deploy` tidak punya permission.
+Ini akan lolos `_DANGER_RE`. Namun bash di server akan mengekspansi escape, jadi perintah tetap tereksekusi sebagai `rm -rf /` — yang akan gagal karena user `odin` tidak punya permission.
 
 **V-3: SSRF via `http_health_check`** (Severity: Rendah)
 
@@ -520,7 +520,7 @@ Mitigasi: compaction otomatis saat >2000 entry. File system space terbatas.
 
 **V-5: Audit log tanpa integrity check** (Severity: Rendah)
 
-Audit log append-only tapi tidak cryptographically signed atau checksummed. Jika penyerang punya akses file (sebagai user `deploy`), bisa mengedit/menghapus audit trail.
+Audit log append-only tapi tidak cryptographically signed atau checksummed. Jika penyerang punya akses file (sebagai user `odin`), bisa mengedit/menghapus audit trail.
 
 Mitigasi: append-only `O_APPEND` mencegah accidental truncation. Untuk forensik serius, perlu log forwarding ke external system.
 

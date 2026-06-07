@@ -34,9 +34,15 @@ Berikut seluruh kapabilitas yang tersedia di ODIN v1.0:
 
 **Audit**: Append-only `audit.jsonl`, setiap tool execution tercatat
 
-**Installer**: `install.sh` (macOS & Linux) + `uninstall.sh` + `odin-update` command
+**Installer**: `install.sh` (macOS & Linux) + `uninstall.sh` + `odin-update` command + setup wizard interaktif
 
 **Metrik**: 2318 baris source + 758 baris test = 3076 total. 1 dependensi (`mcp[cli]`). 80 automated tests.
+
+- **Rename user/path**: Seluruh referensi user `deploy` + path `/home/deploy/agent/` diganti ke user `odin` + path `/home/odin/` (server, client, installer, docs, CLAUDE.md, README.md)
+- **Setup wizard**: `install.sh` menambah wizard interaktif — 3 pertanyaan (SSH host, path run.sh, scope guard), tes koneksi SSH, tulis config otomatis ke `~/.claude.json` dan `settings.json`
+- **Slash command `/odin`**: banner ASCII art + auto-load server status dan memory digest
+- **Guard docstring**: versi diperbarui dari `v0.9.0` ke `v1.0.0`
+- **FULL_REVIEW.md**: analisis teknis 9 dimensi (konsistensi, validitas, optimasi, fitur, kecerdasan, kemudahan, keamanan, kualitas kode, prioritas)
 
 ---
 
