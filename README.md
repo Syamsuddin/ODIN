@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/header.svg" alt="ODIN — MCP Agent AI untuk Server Linux" width="100%"/>
+  <img src="assets/odin_header.png" alt="ODIN — MCP Agent AI untuk Server Linux" width="100%"/>
 </p>
 
 <p align="center">
