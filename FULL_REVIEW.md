@@ -2,7 +2,7 @@
 
 > Analisis menyeluruh dari source code aktual (bukan dari dokumentasi).
 > Tanggal review: 7 Juni 2026. Reviewer: Claude Opus.
-> Cakupan: `server/deploy_agent.py` (1578 baris), `client/deploy_agent_guard.py` (585 baris), `client/update_checker.py` (155 baris), `tests/` (758 baris, 80 test), `install.sh` (467 baris).
+> Cakupan: `server/deploy_agent.py` (1578 baris), `client/deploy_agent_guard.py` (585 baris), `client/update_checker.py` (155 baris), `tests/` (758 baris, 80 test), `install.sh` (857 baris), `install.ps1` (222 baris), `uninstall.sh` (184 baris), `uninstall.ps1` (182 baris).
 
 ---
 
@@ -281,7 +281,7 @@ Worst case: 6 fold per sesi. Masih cepat tapi bisa di-cache.
 | 5 | DB backup tool | Structured backup management (schedule, rotate, verify) | `mysqldump` via `run_command` bekerja tapi tidak ada tracking | Sedang |
 | 6 | Multi-server | Satu sesi mengelola banyak VPS | Satu MCP server = satu VPS. Harus buka sesi berbeda | Tinggi |
 | 7 | Notification | Alert ke Telegram/email saat deploy selesai atau error kritis | Operator harus memantau sesi secara manual | Sedang |
-| 8 | Server installer | `install-server.sh` untuk setup VPS otomatis | Setup server masih manual (scp + venv + chmod) | Rendah |
+| 8 | ~~Server installer~~ | ~~`install-server.sh` untuk setup VPS otomatis~~ | **DONE** — terintegrasi di `install.sh` (setup server via SSH) | — |
 
 ---
 
@@ -409,8 +409,8 @@ Cakupan 22 pattern:
 | Laptop — wizard config | 8/10 | 3 pertanyaan interaktif, auto-write config, re-run safe, SSH test |
 | Laptop — update | 9/10 | `odin-update` command, satu kata |
 | Laptop — uninstall | 8/10 | `curl \| bash`, konfirmasi Y/N, bersih |
-| Server — setup | 4/10 | Manual: scp 2 file, buat venv, chmod. Tidak ada installer |
-| Server — update | 3/10 | Manual: scp ulang 2 file. Tidak ada auto-update |
+| Server — setup | 8/10 | `install.sh` setup server via SSH: buat user odin, venv, upload file, generate run.sh. SSH ControlMaster untuk satu kali auth |
+| Server — update | 5/10 | Re-run `install.sh` untuk upload ulang file. Belum ada `odin-update` khusus server |
 | Dokumentasi | 9/10 | README, CLAUDE.md, EXECUTIVE_SUMMARY, CHANGELOG — lengkap dan akurat |
 
 ### 6.2 Penggunaan Sehari-hari
@@ -458,7 +458,7 @@ Untuk operasi batch (misal runbook 10 steps semua write), user harus konfirmasi 
 | 1. READ/WRITE Classifier | Guard (laptop) | 23 sub-command classifiers. READ → auto-allow, WRITE → lanjut ke lapis 2 | Jika guard file di-tamper atau session hijacked |
 | 2. Risk Engine | Guard (laptop) | 26 shell rules + DB assessor. Menghasilkan risk card 5-tier | User bisa approve semua tier |
 | 3. Hard-block `_DANGER_RE` | Server (VPS) | 14 pola katastrofik. DITOLAK kecuali `allow_dangerous=True` | Parameter `allow_dangerous=True` |
-| 4. OS permissions | Server (VPS) | User `deploy` dengan limited sudoers | Root access (bukan ODIN's problem) |
+| 4. OS permissions | Server (VPS) | User `odin` dengan limited sudoers | Root access (bukan ODIN's problem) |
 
 Filosofi yang benar: "Guard = jaring pengaman UX, bukan sandbox. Batas keamanan sebenarnya = hak akses user OS + aturan sudoers."
 
@@ -632,7 +632,7 @@ Total estimasi: ~40 test baru, menaikkan total dari 80 ke ~120.
 
 | # | Aksi | Impact |
 |---|------|--------|
-| 1 | Server installer (`install-server.sh`) | Turunkan setup server dari 4/10 ke 8/10 |
+| 1 | ~~Server installer~~ | **DONE** — terintegrasi di `install.sh`, setup server via SSH. Skor naik dari 4/10 ke 8/10 |
 | 2 | Auto mode sync (guard baca mode via MCP, bukan file) | Hilangkan manual `echo 'production' > ~/.odin_mode` |
 | 3 | Structured `server_info` (return dict, bukan raw stdout) | Konsisten dengan tool inspeksi lain |
 
@@ -671,7 +671,7 @@ Total estimasi: ~40 test baru, menaikkan total dari 80 ke ~120.
 | Source lines | 2318 (server 1578 + guard 585 + updater 155) |
 | Test lines | 758 (80 tests, 2 files) |
 | Total lines | 3076 source + test |
-| Installer lines | 467 (install.sh + uninstall.sh) |
+| Installer lines | 1445 (install.sh 857 + install.ps1 222 + uninstall.sh 184 + uninstall.ps1 182) |
 | MCP tools | 15 |
 | MCP resources | 1 |
 | Error patterns | 22 |

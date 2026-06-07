@@ -35,13 +35,17 @@ Yang sudah baik:
 - READ auto-approve menghilangkan fatigue konfirmasi untuk inspeksi
 
 Yang menurunkan skor:
-- **Setup sepenuhnya manual**: copy file via SCP, edit hook JSON, konfigurasi SSH, setup venv di server — tidak ada installer atau wizard
+
 - **Debugging koneksi sulit**: jika MCP over SSH gagal, error message tidak informatif (stdio protocol korup = output ngaco, bukan error message jelas)
 - **Tidak ada health indicator**: user tidak tahu apakah ODIN "hidup" atau mati sampai mencoba memanggil tool
-- **Dokumentasi developer-focused**: README dan CLAUDE.md ditulis untuk developer, bukan end-user. Tidak ada "getting started in 5 minutes"
-- **Deployment server juga manual**: `scp` file -> `chmod` -> selesai. Tidak ada versioning, tidak ada update mechanism
 
-**Skenario nyata**: Seorang sysadmin yang baru mau pakai ODIN harus: (1) install Claude Code, (2) setup SSH ke server, (3) buat venv + install mcp, (4) copy 2 file, (5) chmod, (6) buat MCP config JSON, (7) copy guard ke hooks, (8) buat hook config JSON. Itu 8 langkah manual sebelum bisa mengetik perintah pertama.
+Yang sudah diperbaiki di v1.0:
+
+- ~~Setup sepenuhnya manual~~ → `install.sh` terintegrasi: wizard 3 pertanyaan (SSH host, path run.sh, scope guard) + auto-write config ke `~/.claude.json` dan `settings.json`
+- ~~Deployment server manual~~ → `install.sh` setup server via SSH: buat user odin, venv, upload file, generate run.sh. SSH ControlMaster untuk satu kali auth
+- ~~Dokumentasi developer-focused~~ → README lengkap dengan panduan instalasi, arsitektur, dan cara kerja end-to-end
+
+**Skenario nyata (v1.0)**: Seorang sysadmin yang baru mau pakai ODIN: (1) install Claude Code, (2) jalankan `curl | bash`, (3) jawab 3 pertanyaan wizard, (4) pilih Y untuk setup server via SSH. Selesai — 4 langkah, bukan 8.
 
 ---
 

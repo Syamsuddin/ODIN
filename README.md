@@ -1,10 +1,34 @@
-# ODIN v1.0
+<p align="center">
+  <img src="assets/header.svg" alt="ODIN — MCP Agent AI untuk Server Linux" width="100%"/>
+</p>
 
-**MCP Agent AI untuk server Linux** — jembatan dari Claude Code (otak di laptop) ke server live (tangan di VPS).
+<p align="center">
+  <a href="#"><img src="https://img.shields.io/badge/version-1.0.0-gold?style=for-the-badge&logo=semanticrelease&logoColor=white" alt="Version 1.0.0"/></a>
+  <a href="#"><img src="https://img.shields.io/badge/python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.10+"/></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=for-the-badge&logo=gnu&logoColor=white" alt="AGPL-3.0"/></a>
+  <a href="#"><img src="https://img.shields.io/badge/tests-80_passing-brightgreen?style=for-the-badge&logo=pytest&logoColor=white" alt="80 Tests Passing"/></a>
+</p>
 
-Perintah natural-language dari manusia -> Claude Code memahami intent -> ODIN mengeksekusi CLI di server -> baca output -> analisis -> ulangi sampai selesai.
+<p align="center">
+  <a href="#"><img src="https://img.shields.io/badge/MCP_Tools-15-00bcd4?style=flat-square&logo=lightning&logoColor=white" alt="15 MCP Tools"/></a>
+  <a href="#"><img src="https://img.shields.io/badge/Security-4_Layers-e53935?style=flat-square&logo=shield&logoColor=white" alt="4 Security Layers"/></a>
+  <a href="#"><img src="https://img.shields.io/badge/Risk_Tiers-5-ff9800?style=flat-square&logo=alert&logoColor=white" alt="5 Risk Tiers"/></a>
+  <a href="#"><img src="https://img.shields.io/badge/Dependencies-1_(mcp%5Bcli%5D)-4caf50?style=flat-square&logo=pypi&logoColor=white" alt="1 Dependency"/></a>
+  <a href="#"><img src="https://img.shields.io/badge/Daemon-Zero-4caf50?style=flat-square&logo=linux&logoColor=white" alt="Zero Daemon"/></a>
+  <a href="#"><img src="https://img.shields.io/badge/Transport-SSH_stdio-0097a7?style=flat-square&logo=gnometerminal&logoColor=white" alt="SSH stdio"/></a>
+</p>
 
-**Dua file Python. Satu dependensi. Nol framework. Nol daemon.**
+<p align="center">
+  <b>MCP Agent AI untuk server Linux</b> — jembatan dari Claude Code (otak di laptop) ke server live (tangan di VPS).
+</p>
+
+<p align="center">
+  <i>Perintah natural-language dari manusia &#8594; Claude Code memahami intent &#8594; ODIN mengeksekusi di server &#8594; analisis &#8594; ulangi sampai selesai.</i>
+</p>
+
+<p align="center">
+  <b>Dua file Python. Satu dependensi. Nol framework. Nol daemon.</b>
+</p>
 
 ---
 
@@ -60,8 +84,10 @@ ODIN/
 │   └── test_profile_mode.py   # Test server profiler & mode (44 tests)
 ├── docs/
 │   └── MEMORY_NOTES.md        # Dokumentasi sistem memory
-├── install.sh                 # Installer otomatis (macOS & Linux)
-├── uninstall.sh               # Uninstaller
+├── install.sh                 # Installer + server setup wizard (macOS & Linux, 857 baris)
+├── install.ps1                # Installer Windows (PowerShell)
+├── uninstall.sh               # Uninstaller + auto-clean config (macOS & Linux)
+├── uninstall.ps1              # Uninstaller Windows (PowerShell)
 ├── requirements.txt           # Dependensi: mcp[cli]
 ├── CLAUDE.md                  # Instruksi untuk Claude Code
 ├── CHANGELOG.md               # Riwayat perubahan
@@ -234,17 +260,33 @@ Setiap eksekusi tool dicatat ke `audit.jsonl`: timestamp, tool, summary, success
 curl -fsSL https://raw.githubusercontent.com/Syamsuddin/ODIN/main/install.sh | bash
 ```
 
-Installer menangani: clone repo, buat venv, install `mcp[cli]`, setup guard hook, buat perintah `odin-update`.
+Installer terintegrasi menangani **laptop + server** dalam satu langkah:
+
+**Tahap 1 — Laptop (otomatis)**
+- Clone repo, buat venv, install `mcp[cli]`, setup guard hook, buat perintah `odin-update`
+- Wizard interaktif: 3 pertanyaan (SSH host, path `run.sh`, scope guard) → config ditulis otomatis ke `~/.claude.json` dan `settings.json`
+- Tes koneksi SSH ke server
+
+**Tahap 2 — Server via SSH (opsional, ditawarkan setelah laptop selesai)**
+- Cek Python 3 dan `python3-venv` di server
+- Buat user `odin` jika belum ada
+- Buat venv + install `mcp[cli]`
+- Upload `deploy_agent.py` dan generate `run.sh` dengan config yang benar
+- Set password user `odin`
+- Verifikasi semua file terpasang
+
+SSH ControlMaster digunakan agar hanya satu kali autentikasi selama setup.
+
+**Windows**: `irm https://raw.githubusercontent.com/Syamsuddin/ODIN/main/install.ps1 | iex` (laptop only, server setup manual)
 
 ### Manual
+
+Jika lebih memilih setup manual (atau installer gagal):
 
 **1. Di Laptop (client)**
 
 ```bash
-# Clone repo
 git clone https://github.com/Syamsuddin/ODIN.git ~/.odin
-
-# Buat venv + install dependensi
 cd ~/.odin
 python3 -m venv .venv && .venv/bin/pip install "mcp[cli]"
 ```
@@ -252,20 +294,27 @@ python3 -m venv .venv && .venv/bin/pip install "mcp[cli]"
 **2. Di Server (VPS)**
 
 ```bash
-ssh <host>
-mkdir -p /home/odin && cd /home/odin
-python3 -m venv .venv && .venv/bin/pip install "mcp[cli]"
+# Buat user odin (sebagai root)
+useradd -m -s /bin/bash odin
+passwd odin
+
+# Setup venv + install dependensi
+python3 -m venv /home/odin/.venv
+/home/odin/.venv/bin/pip install "mcp[cli]"
 
 # Salin file dari laptop
 scp ~/.odin/server/deploy_agent.py  <host>:/home/odin/
 scp ~/.odin/server/run.sh           <host>:/home/odin/
 
-chmod 600 deploy_agent.py && chmod 755 run.sh
+# Set permissions
+chmod 600 /home/odin/deploy_agent.py
+chmod 755 /home/odin/run.sh
+chown -R odin:odin /home/odin/
 ```
 
 **3. Konfigurasi Claude Code**
 
-MCP server (`~/.claude.json` atau project `.claude.json`):
+MCP server (`~/.claude.json`):
 
 ```json
 {
@@ -323,6 +372,10 @@ odin-update
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Syamsuddin/ODIN/main/uninstall.sh | bash
 ```
+
+Uninstaller menghapus direktori ODIN, membersihkan config `mcpServers.odin` dan hook `mcp__odin__` dari `~/.claude.json` dan semua `settings.json` secara otomatis, serta menawarkan cleanup server via SSH.
+
+Windows: `irm https://raw.githubusercontent.com/Syamsuddin/ODIN/main/uninstall.ps1 | iex`
 
 ---
 

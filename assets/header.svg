@@ -1,0 +1,183 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400" width="1200" height="400">
+  <defs>
+    <!-- Background gradient: deep navy to dark blue -->
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a0e27"/>
+      <stop offset="50%" stop-color="#0f1a3a"/>
+      <stop offset="100%" stop-color="#0a1628"/>
+    </linearGradient>
+    <!-- Gold accent gradient -->
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f7d86c"/>
+      <stop offset="50%" stop-color="#e8b830"/>
+      <stop offset="100%" stop-color="#d4a017"/>
+    </linearGradient>
+    <!-- Cyan accent gradient -->
+    <linearGradient id="cyan" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#00e5ff"/>
+      <stop offset="100%" stop-color="#0097a7"/>
+    </linearGradient>
+    <!-- Glow filter -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+    <filter id="glow-strong" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="12" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+    <!-- Subtle grid pattern -->
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1a2a4a" stroke-width="0.5" opacity="0.4"/>
+    </pattern>
+    <!-- Circuit-like pattern -->
+    <pattern id="circuit" width="80" height="80" patternUnits="userSpaceOnUse">
+      <circle cx="0" cy="0" r="1.5" fill="#1e3a5f" opacity="0.5"/>
+      <circle cx="80" cy="0" r="1.5" fill="#1e3a5f" opacity="0.5"/>
+      <circle cx="0" cy="80" r="1.5" fill="#1e3a5f" opacity="0.5"/>
+      <circle cx="80" cy="80" r="1.5" fill="#1e3a5f" opacity="0.5"/>
+      <circle cx="40" cy="40" r="1.5" fill="#1e3a5f" opacity="0.5"/>
+    </pattern>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="400" fill="url(#bg)"/>
+  <rect width="1200" height="400" fill="url(#grid)"/>
+  <rect width="1200" height="400" fill="url(#circuit)"/>
+
+  <!-- Decorative SSH connection lines (left side) -->
+  <g opacity="0.15">
+    <line x1="0" y1="100" x2="300" y2="200" stroke="#00e5ff" stroke-width="1" stroke-dasharray="8,6"/>
+    <line x1="0" y1="180" x2="250" y2="230" stroke="#00e5ff" stroke-width="1" stroke-dasharray="8,6"/>
+    <line x1="0" y1="260" x2="300" y2="250" stroke="#00e5ff" stroke-width="1" stroke-dasharray="8,6"/>
+    <line x1="900" y1="150" x2="1200" y2="100" stroke="#00e5ff" stroke-width="1" stroke-dasharray="8,6"/>
+    <line x1="950" y1="250" x2="1200" y2="280" stroke="#00e5ff" stroke-width="1" stroke-dasharray="8,6"/>
+    <line x1="920" y1="300" x2="1200" y2="340" stroke="#00e5ff" stroke-width="1" stroke-dasharray="8,6"/>
+  </g>
+
+  <!-- Laptop icon (left side) -->
+  <g transform="translate(130, 140)" opacity="0.6">
+    <!-- Laptop body -->
+    <rect x="0" y="0" width="70" height="45" rx="4" fill="none" stroke="#5eafc5" stroke-width="1.5"/>
+    <!-- Screen content lines -->
+    <line x1="8" y1="12" x2="40" y2="12" stroke="#3d8ca0" stroke-width="1.5" opacity="0.8"/>
+    <line x1="8" y1="20" x2="55" y2="20" stroke="#3d8ca0" stroke-width="1.5" opacity="0.6"/>
+    <line x1="8" y1="28" x2="35" y2="28" stroke="#3d8ca0" stroke-width="1.5" opacity="0.4"/>
+    <!-- Terminal cursor -->
+    <rect x="8" y="34" width="6" height="2" fill="#00e5ff" opacity="0.9"/>
+    <!-- Laptop base -->
+    <path d="M-8 48 L78 48 L72 45 L-2 45 Z" fill="none" stroke="#5eafc5" stroke-width="1.5"/>
+    <!-- Label -->
+    <text x="35" y="72" text-anchor="middle" font-family="monospace" font-size="10" fill="#5eafc5" opacity="0.8">LAPTOP</text>
+    <text x="35" y="84" text-anchor="middle" font-family="monospace" font-size="8" fill="#3d8ca0" opacity="0.6">Claude Code</text>
+  </g>
+
+  <!-- SSH Connection arrow -->
+  <g transform="translate(240, 165)" filter="url(#glow)">
+    <line x1="0" y1="0" x2="80" y2="0" stroke="url(#cyan)" stroke-width="1.5" stroke-dasharray="6,4"/>
+    <text x="40" y="-8" text-anchor="middle" font-family="monospace" font-size="8" fill="#00e5ff" opacity="0.7">SSH stdio</text>
+    <polygon points="80,-4 88,0 80,4" fill="#00e5ff" opacity="0.7"/>
+  </g>
+
+  <!-- Server icon (right of SSH arrow) -->
+  <g transform="translate(340, 130)" opacity="0.6">
+    <!-- Server rack -->
+    <rect x="0" y="0" width="65" height="75" rx="4" fill="none" stroke="#5eafc5" stroke-width="1.5"/>
+    <!-- Server units -->
+    <line x1="5" y1="20" x2="60" y2="20" stroke="#3d8ca0" stroke-width="0.8"/>
+    <line x1="5" y1="40" x2="60" y2="40" stroke="#3d8ca0" stroke-width="0.8"/>
+    <line x1="5" y1="55" x2="60" y2="55" stroke="#3d8ca0" stroke-width="0.8"/>
+    <!-- LED indicators -->
+    <circle cx="12" cy="10" r="2.5" fill="#00e562" opacity="0.9"/>
+    <circle cx="22" cy="10" r="2.5" fill="#00e562" opacity="0.6"/>
+    <circle cx="12" cy="30" r="2.5" fill="#00e5ff" opacity="0.8"/>
+    <circle cx="22" cy="30" r="2.5" fill="#00e5ff" opacity="0.5"/>
+    <circle cx="12" cy="48" r="2.5" fill="#e8b830" opacity="0.7"/>
+    <!-- Label -->
+    <text x="32" y="92" text-anchor="middle" font-family="monospace" font-size="10" fill="#5eafc5" opacity="0.8">SERVER</text>
+    <text x="32" y="104" text-anchor="middle" font-family="monospace" font-size="8" fill="#3d8ca0" opacity="0.6">Linux VPS</text>
+  </g>
+
+  <!-- Main title: ODIN -->
+  <g filter="url(#glow-strong)">
+    <text x="600" y="155" text-anchor="middle" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="90" font-weight="900" fill="url(#gold)" letter-spacing="18">ODIN</text>
+  </g>
+  <!-- Subtle title outline for depth -->
+  <text x="600" y="155" text-anchor="middle" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="90" font-weight="900" fill="none" stroke="#f7d86c" stroke-width="0.5" letter-spacing="18" opacity="0.3">ODIN</text>
+
+  <!-- Rune-inspired decorative lines around title -->
+  <g opacity="0.3">
+    <!-- Left rune line -->
+    <line x1="430" y1="120" x2="430" y2="165" stroke="url(#gold)" stroke-width="2"/>
+    <line x1="425" y1="115" x2="435" y2="115" stroke="url(#gold)" stroke-width="2"/>
+    <!-- Right rune line -->
+    <line x1="770" y1="120" x2="770" y2="165" stroke="url(#gold)" stroke-width="2"/>
+    <line x1="765" y1="115" x2="775" y2="115" stroke="url(#gold)" stroke-width="2"/>
+  </g>
+
+  <!-- Version badge -->
+  <g transform="translate(600, 175)">
+    <rect x="-30" y="0" width="60" height="20" rx="10" fill="#e8b830" opacity="0.15"/>
+    <text x="0" y="14" text-anchor="middle" font-family="monospace" font-size="12" fill="#e8b830" font-weight="bold">v1.0</text>
+  </g>
+
+  <!-- Subtitle -->
+  <text x="600" y="220" text-anchor="middle" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="22" fill="#8ab4d6" letter-spacing="2">MCP Agent AI untuk Server Linux</text>
+
+  <!-- Tagline -->
+  <text x="600" y="250" text-anchor="middle" font-family="monospace" font-size="13" fill="#5a8aab" letter-spacing="1">Claude Code (otak) ── SSH ──▶ ODIN (tangan) ── VPS</text>
+
+  <!-- Feature pills row -->
+  <g transform="translate(600, 285)">
+    <!-- Pill: 15 Tools -->
+    <g transform="translate(-280, 0)">
+      <rect x="-45" y="-12" width="90" height="24" rx="12" fill="#00e5ff" fill-opacity="0.1" stroke="#00e5ff" stroke-width="0.8" stroke-opacity="0.3"/>
+      <text x="0" y="4" text-anchor="middle" font-family="monospace" font-size="11" fill="#00e5ff">15 Tools</text>
+    </g>
+    <!-- Pill: 4 Layers -->
+    <g transform="translate(-155, 0)">
+      <rect x="-50" y="-12" width="100" height="24" rx="12" fill="#00e5ff" fill-opacity="0.1" stroke="#00e5ff" stroke-width="0.8" stroke-opacity="0.3"/>
+      <text x="0" y="4" text-anchor="middle" font-family="monospace" font-size="11" fill="#00e5ff">4-Layer Sec</text>
+    </g>
+    <!-- Pill: 5 Risk Tiers -->
+    <g transform="translate(-20, 0)">
+      <rect x="-55" y="-12" width="110" height="24" rx="12" fill="#e8b830" fill-opacity="0.1" stroke="#e8b830" stroke-width="0.8" stroke-opacity="0.3"/>
+      <text x="0" y="4" text-anchor="middle" font-family="monospace" font-size="11" fill="#e8b830">5 Risk Tiers</text>
+    </g>
+    <!-- Pill: 1 Dependency -->
+    <g transform="translate(120, 0)">
+      <rect x="-55" y="-12" width="110" height="24" rx="12" fill="#00e562" fill-opacity="0.1" stroke="#00e562" stroke-width="0.8" stroke-opacity="0.3"/>
+      <text x="0" y="4" text-anchor="middle" font-family="monospace" font-size="11" fill="#00e562">1 Dependency</text>
+    </g>
+    <!-- Pill: Zero Daemon -->
+    <g transform="translate(260, 0)">
+      <rect x="-55" y="-12" width="110" height="24" rx="12" fill="#00e562" fill-opacity="0.1" stroke="#00e562" stroke-width="0.8" stroke-opacity="0.3"/>
+      <text x="0" y="4" text-anchor="middle" font-family="monospace" font-size="11" fill="#00e562">Zero Daemon</text>
+    </g>
+  </g>
+
+  <!-- Odin's ravens: Huginn (thought) and Muninn (memory) -->
+  <!-- Left raven silhouette (Huginn = AI thought) -->
+  <g transform="translate(85, 60)" opacity="0.25">
+    <path d="M0,20 Q5,5 15,0 Q20,2 22,8 Q28,4 32,10 Q30,15 25,18 L20,30 L15,25 L10,32 L8,25 Z" fill="#e8b830" transform="scale(1.2)"/>
+    <text x="18" y="52" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="8" fill="#e8b830" font-style="italic">Huginn</text>
+  </g>
+
+  <!-- Right raven silhouette (Muninn = memory) -->
+  <g transform="translate(1065, 55)" opacity="0.25">
+    <path d="M32,20 Q27,5 17,0 Q12,2 10,8 Q4,4 0,10 Q2,15 7,18 L12,30 L17,25 L22,32 L24,25 Z" fill="#e8b830" transform="scale(1.2)"/>
+    <text x="18" y="52" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="8" fill="#e8b830" font-style="italic">Muninn</text>
+  </g>
+
+  <!-- Bottom decorative line -->
+  <line x1="200" y1="340" x2="1000" y2="340" stroke="url(#gold)" stroke-width="0.8" opacity="0.2"/>
+
+  <!-- Bottom text -->
+  <text x="600" y="365" text-anchor="middle" font-family="monospace" font-size="11" fill="#4a6a8a" letter-spacing="3">2 FILE PYTHON  ·  SSH STDIO MCP  ·  DEFENSE IN DEPTH</text>
+
+  <!-- Corner decorations -->
+  <path d="M0,0 L60,0 L60,3 L3,3 L3,60 L0,60 Z" fill="url(#gold)" opacity="0.15"/>
+  <path d="M1200,0 L1140,0 L1140,3 L1197,3 L1197,60 L1200,60 Z" fill="url(#gold)" opacity="0.15"/>
+  <path d="M0,400 L60,400 L60,397 L3,397 L3,340 L0,340 Z" fill="url(#gold)" opacity="0.15"/>
+  <path d="M1200,400 L1140,400 L1140,397 L1197,397 L1197,340 L1200,340 Z" fill="url(#gold)" opacity="0.15"/>
+</svg>

@@ -144,8 +144,12 @@ function Show-ConfigGuide {
 
     Write-Host "`n  1." -ForegroundColor Yellow -NoNewline
     Write-Host " Setup server (di VPS):" -ForegroundColor White
-    Write-Host "     scp $InstallDir\server\deploy_agent.py  user@server:/home/deploy/agent/"
-    Write-Host "     scp $InstallDir\server\run.sh            user@server:/home/deploy/agent/"
+    Write-Host "     scp $InstallDir\server\deploy_agent.py  odin@server:/home/odin/"
+    Write-Host "     scp $InstallDir\server\run.sh            odin@server:/home/odin/"
+    Write-Host ""
+    Write-Host "     Di server, buat venv & install dependensi:"
+    Write-Host "       python3 -m venv /home/odin/.venv"
+    Write-Host "       /home/odin/.venv/bin/pip install `"mcp[cli]`""
 
     Write-Host "`n  2." -ForegroundColor Yellow -NoNewline
     Write-Host " Konfigurasi MCP (Claude Code):" -ForegroundColor White
@@ -157,7 +161,7 @@ function Show-ConfigGuide {
          "odin": {
            "type": "stdio",
            "command": "ssh",
-           "args": ["your-server-alias", "/home/deploy/agent/run.sh"]
+           "args": ["your-server-alias", "/home/odin/run.sh"]
          }
        }
      }
@@ -169,6 +173,18 @@ function Show-ConfigGuide {
     Write-Host @"
 
      {
+       "permissions": {
+         "allow": [
+           "mcp__odin__server_info",
+           "mcp__odin__tail_log",
+           "mcp__odin__http_health_check",
+           "mcp__odin__memory_recall",
+           "mcp__odin__memory_digest",
+           "mcp__odin__session_history",
+           "mcp__odin__rollback_plan",
+           "mcp__odin__inspect_server"
+         ]
+       },
        "hooks": {
          "PreToolUse": [
            {
