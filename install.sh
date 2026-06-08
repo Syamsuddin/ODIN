@@ -12,6 +12,14 @@ BIN_LINK="/usr/local/bin/odin-update"
 BRANCH="main"
 MIN_PYTHON="3.10"
 
+# ── TTY untuk input interaktif (penting saat curl | bash) ──────────────────
+if [ -t 0 ]; then
+    TTY_FD=0
+else
+    exec 3</dev/tty 2>/dev/null || { echo "ERROR: Tidak bisa membuka /dev/tty untuk input interaktif." >&2; exit 1; }
+    TTY_FD=3
+fi
+
 # ── Warna & simbol ──────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
@@ -27,7 +35,7 @@ banner() {
     cat <<'ART'
     ╔══════════════════════════════════════════════════════════╗
     ║                                                          ║
-    ║               ⚡  O D I N  Installer  ⚡               ║
+    ║               ⚡  O D I N  Installer  ⚡                   ║
     ║               MCP Agent AI for Claude Code               ║
     ║                                                          ║
     ║  created by @syams_ideris (syamsuddin.ideris@gmail.com)  ║
@@ -86,7 +94,9 @@ check_prereqs() {
 install_odin() {
     if [ -d "$INSTALL_DIR/.git" ]; then
         info "Instalasi ODIN sudah ada di $INSTALL_DIR — memperbarui..."
-        git -C "$INSTALL_DIR" fetch origin "$BRANCH" --quiet
+        if ! git -C "$INSTALL_DIR" fetch origin "$BRANCH" --quiet 2>&1; then
+            fatal "Gagal fetch dari GitHub. Cek koneksi internet."
+        fi
         git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH" --quiet
         ok "ODIN diperbarui ke versi terbaru"
     else
@@ -95,7 +105,9 @@ install_odin() {
             warn "$INSTALL_DIR sudah ada (bukan git repo) — backup & replace"
             mv "$INSTALL_DIR" "${INSTALL_DIR}.bak.$(date +%s)"
         fi
-        git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR" --quiet
+        if ! git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR" --quiet 2>&1; then
+            fatal "Gagal clone dari GitHub. Cek koneksi internet."
+        fi
         ok "ODIN berhasil diunduh"
     fi
 }
@@ -107,10 +119,18 @@ setup_venv() {
         return
     fi
     info "Membuat virtual environment..."
-    "$PYTHON" -m venv "$venv_dir"
-    "$venv_dir/bin/pip" install --quiet --upgrade pip
-    "$venv_dir/bin/pip" install --quiet -r "$INSTALL_DIR/requirements.txt"
-    ok "Dependensi terinstall (mcp[cli])"
+    if ! "$PYTHON" -m venv "$venv_dir"; then
+        fatal "Gagal membuat venv. Pastikan python3-venv terinstall."
+    fi
+    info "Menginstall dependensi (mcp[cli])..."
+    if ! "$venv_dir/bin/pip" install --upgrade pip >/dev/null 2>&1; then
+        warn "Gagal upgrade pip — melanjutkan..."
+    fi
+    if "$venv_dir/bin/pip" install -q -r "$INSTALL_DIR/requirements.txt"; then
+        ok "Dependensi terinstall (mcp[cli])"
+    else
+        fatal "Gagal install mcp[cli]. Cek koneksi internet."
+    fi
 }
 
 install_guard_hook() {
@@ -170,31 +190,31 @@ ask_input() {
     local prompt_text="$1" default_val="$2" result=""
     while true; do
         if [ -n "$default_val" ]; then
-            printf "${BOLD}  %s${NC} [${CYAN}%s${NC}]: " "$prompt_text" "$default_val"
+            printf "${BOLD}  %s${NC} [${CYAN}%s${NC}]: " "$prompt_text" "$default_val" >/dev/tty
         else
-            printf "${BOLD}  %s${NC}: " "$prompt_text"
+            printf "${BOLD}  %s${NC}: " "$prompt_text" >/dev/tty
         fi
-        read -r result
+        read -r result <&"$TTY_FD"
         result="${result:-$default_val}"
         if [ -n "$result" ]; then
             echo "$result"
             return
         fi
-        warn "Nilai tidak boleh kosong."
+        printf "${YELLOW}⚠${NC} Nilai tidak boleh kosong.\n" >/dev/tty
     done
 }
 
 ask_choice() {
     local prompt_text="$1" max="$2" default="$3" choice=""
     while true; do
-        printf "${BOLD}  %s${NC} [${CYAN}%s${NC}]: " "$prompt_text" "$default"
-        read -r choice
+        printf "${BOLD}  %s${NC} [${CYAN}%s${NC}]: " "$prompt_text" "$default" >/dev/tty
+        read -r choice <&"$TTY_FD"
         choice="${choice:-$default}"
         if [[ "$choice" =~ ^[1-9][0-9]*$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$max" ]; then
             echo "$choice"
             return
         fi
-        warn "Pilih 1-${max}."
+        printf "${YELLOW}⚠${NC} Pilih 1-%s.\n" "$max" >/dev/tty
     done
 }
 
@@ -375,7 +395,7 @@ setup_wizard() {
         printf "      SSH host  : ${CYAN}%s${NC}\n" "$EXISTING_SSH_HOST"
         printf "      Path      : ${CYAN}%s${NC}\n\n" "$EXISTING_RUN_PATH"
         printf "${BOLD}  Konfigurasi ulang? [y/N]${NC}: "
-        read -r reconfig
+        read -r reconfig <&"$TTY_FD"
         if [[ ! "$reconfig" =~ ^[Yy]$ ]]; then
             info "Config tidak diubah."
             wizard_skipped=true
@@ -399,7 +419,7 @@ setup_wizard() {
     printf "│  Path run.sh di server\n"
     run_path=$(ask_input "Path run.sh" "${run_path:-/home/odin/run.sh}")
     printf "│\n"
-    test_ssh "$ssh_host" "$run_path"
+    test_ssh "$ssh_host" "$run_path" || true
     printf "│\n└──────────────────────────────────────────────────────\n\n"
 
     # ── Scope Guard ────────────────────────────────────────────────────
@@ -440,7 +460,7 @@ setup_wizard() {
     printf "│    • ${CYAN}%s${NC}\n" "$settings_path"
     printf "│\n"
     printf "${BOLD}│  Tulis konfigurasi? [Y/n]${NC}: "
-    read -r confirm
+    read -r confirm <&"$TTY_FD"
     if [[ "$confirm" =~ ^[Nn]$ ]]; then
         info "Dibatalkan — konfigurasi tidak ditulis."
         WIZARD_DONE=false
@@ -451,12 +471,22 @@ setup_wizard() {
 
     # ── Tulis config ───────────────────────────────────────────────────
     info "Menulis MCP config ke ~/.claude.json..."
-    write_mcp_config "$ssh_host" "$run_path"
-    ok "mcpServers.odin ditambahkan (existing config dipertahankan)"
+    if write_mcp_config "$ssh_host" "$run_path"; then
+        ok "mcpServers.odin ditambahkan (existing config dipertahankan)"
+    else
+        err "Gagal menulis ~/.claude.json — periksa file format dan permissions"
+        WIZARD_DONE=false
+        return
+    fi
 
     info "Menulis guard hook ke $settings_path..."
-    write_guard_config "$settings_path" "$guard_path"
-    ok "PreToolUse hook + permissions ditambahkan"
+    if write_guard_config "$settings_path" "$guard_path"; then
+        ok "PreToolUse hook + permissions ditambahkan"
+    else
+        err "Gagal menulis $settings_path — periksa permissions"
+        WIZARD_DONE=false
+        return
+    fi
 
     WIZARD_DONE=true
 }
@@ -548,7 +578,7 @@ setup_server() {
     printf "│\n"
     printf "${BOLD}│  Lanjutkan? [Y/n]${NC}: "
     local confirm
-    read -r confirm
+    read -r confirm <&"$TTY_FD"
     if [[ "$confirm" =~ ^[Nn]$ ]]; then
         info "Setup server dibatalkan."
         printf "│\n└──────────────────────────────────────────────────────\n\n"
@@ -624,13 +654,17 @@ setup_server() {
     printf "  ${BLUE}▸${NC} Membuat venv & install mcp[cli]...\n"
     printf "    ${YELLOW}(bisa memakan waktu 1-2 menit)${NC}\n"
 
-    ssh_run "cat > /tmp/odin_venv.sh && chmod +x /tmp/odin_venv.sh" <<'VENVEOF'
+    if ! ssh_run "cat > /tmp/odin_venv.sh && chmod +x /tmp/odin_venv.sh" <<'VENVEOF'
 #!/bin/bash
 set -e
 python3 -m venv /home/odin/.venv
 /home/odin/.venv/bin/pip install --quiet --upgrade pip
 /home/odin/.venv/bin/pip install --quiet "mcp[cli]"
 VENVEOF
+    then
+        err "  Gagal mengirim script venv ke server"
+        ssh_close; trap - EXIT; SERVER_DONE=false; return
+    fi
     ssh_run "${pp}chown odin:odin /tmp/odin_venv.sh" 2>/dev/null || true
     local venv_out
     if venv_out=$(ssh_run "${pp}su - odin -c '/tmp/odin_venv.sh'" 2>&1); then
@@ -844,7 +878,7 @@ main() {
     printf "\n"
     printf "  ${BOLD}Setup ODIN di server juga via SSH? [Y/n]${NC}: "
     local do_server
-    read -r do_server
+    read -r do_server <&"$TTY_FD"
     if [[ ! "$do_server" =~ ^[Nn]$ ]]; then
         setup_server
     fi
@@ -877,3 +911,4 @@ main() {
 }
 
 main "$@"
+[ "$TTY_FD" = 3 ] && exec 3<&- 2>/dev/null || true
