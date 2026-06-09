@@ -35,7 +35,7 @@ banner() {
     cat <<'ART'
     ╔══════════════════════════════════════════════════════════╗
     ║                                                          ║
-    ║               ⚡  O D I N  Installer  ⚡                   ║
+    ║               ⚡  O D I N  Installer  ⚡                ║
     ║               MCP Agent AI for Claude Code               ║
     ║                                                          ║
     ║  created by @syams_ideris (syamsuddin.ideris@gmail.com)  ║
@@ -190,9 +190,9 @@ ask_input() {
     local prompt_text="$1" default_val="$2" result=""
     while true; do
         if [ -n "$default_val" ]; then
-            printf "${BOLD}  %s${NC} [${CYAN}%s${NC}]: " "$prompt_text" "$default_val" >/dev/tty
+            printf "${BOLD}  %s${NC} [Enter = ${CYAN}%s${NC}]: " "$prompt_text" "$default_val" >/dev/tty
         else
-            printf "${BOLD}  %s${NC}: " "$prompt_text" >/dev/tty
+            printf "${BOLD}  %s${NC} (wajib diisi): " "$prompt_text" >/dev/tty
         fi
         read -r result <&"$TTY_FD"
         result="${result:-$default_val}"
@@ -207,7 +207,7 @@ ask_input() {
 ask_choice() {
     local prompt_text="$1" max="$2" default="$3" choice=""
     while true; do
-        printf "${BOLD}  %s${NC} [${CYAN}%s${NC}]: " "$prompt_text" "$default" >/dev/tty
+        printf "${BOLD}  %s${NC} [Enter = ${CYAN}%s${NC}]: " "$prompt_text" "$default" >/dev/tty
         read -r choice <&"$TTY_FD"
         choice="${choice:-$default}"
         if [[ "$choice" =~ ^[1-9][0-9]*$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$max" ]; then
@@ -218,15 +218,60 @@ ask_choice() {
     done
 }
 
+# Deteksi apakah input adalah SSH alias dari ~/.ssh/config
+is_ssh_alias() {
+    local host="$1"
+    [ -f "$HOME/.ssh/config" ] || return 1
+    awk -v h="$host" '
+        /^[[:space:]]*[Hh]ost[[:space:]]/ {
+            for (i=2; i<=NF; i++) if ($i == h) { found=1; exit }
+        }
+        END { exit !found }
+    ' "$HOME/.ssh/config" 2>/dev/null
+}
+
 test_ssh() {
-    local host="$1" run_path="$2"
-    printf "  ${BLUE}▸${NC} Menguji koneksi SSH ke ${CYAN}%s${NC}... " "$host"
-    if ssh -o ConnectTimeout=5 -o BatchMode=yes "$host" "test -f '$run_path'" 2>/dev/null; then
-        printf "${GREEN}✓ OK${NC}\n"
+    local host="$1" run_path="$2" port="${3:-}" user="${4:-}"
+    local ssh_args=(-o ConnectTimeout=5 -o BatchMode=yes)
+    [ -n "$port" ] && [ "$port" != "22" ] && ssh_args+=(-p "$port")
+    local target="$host"
+    [ -n "$user" ] && target="${user}@${host}"
+
+    printf "│  ${BLUE}▸${NC} Test SSH ke ${CYAN}%s${NC}" "$target"
+    [ -n "$port" ] && [ "$port" != "22" ] && printf " port ${CYAN}%s${NC}" "$port"
+    printf "... "
+
+    local ssh_err
+    ssh_err=$(ssh "${ssh_args[@]}" "$target" "echo ok" 2>&1)
+    local ssh_rc=$?
+
+    if [ $ssh_rc -eq 0 ]; then
+        printf "${GREEN}✓ terhubung${NC}\n"
+        if ssh "${ssh_args[@]}" "$target" "test -f '$run_path'" 2>/dev/null; then
+            printf "│  ${GREEN}✓${NC} File ${CYAN}%s${NC} ditemukan di server\n" "$run_path"
+        else
+            printf "│  ${YELLOW}⚠${NC} File %s belum ada (akan dibuat saat setup server)\n" "$run_path"
+        fi
         return 0
     else
-        printf "${YELLOW}⚠${NC}\n"
-        warn "Koneksi gagal atau file belum ada — lanjutkan setup, perbaiki nanti."
+        printf "${YELLOW}⚠ gagal${NC}\n"
+        # Diagnosa spesifik berdasarkan error message
+        if echo "$ssh_err" | grep -qi "permission denied"; then
+            printf "│  ${YELLOW}⚠${NC} Server merespons, tapi login ditolak.\n"
+            printf "│    → Port ${CYAN}%s${NC} benar, tapi user ${CYAN}%s${NC} belum bisa login.\n" "${port:-22}" "$target"
+            printf "│    → Password/SSH key perlu di-set (akan diatur di Setup Server).\n"
+            printf "│  ${BLUE}ℹ${NC}  Ini normal jika user odin belum di-setup — wizard tetap lanjut.\n"
+        elif echo "$ssh_err" | grep -qi "timed out\|no route\|network is unreachable"; then
+            printf "│  ${RED}✗${NC} Server tidak bisa dihubungi.\n"
+            printf "│    → Periksa: IP/hostname benar? Port SSH benar? Server online?\n"
+            printf "│    → Jika port SSH bukan %s, ubah di input sebelumnya.\n" "${port:-22}"
+        elif echo "$ssh_err" | grep -qi "refused"; then
+            printf "│  ${RED}✗${NC} Koneksi ditolak (port ${CYAN}%s${NC} tidak menerima SSH).\n" "${port:-22}"
+            printf "│    → Kemungkinan port SSH berbeda. Cek: ${CYAN}ssh -p PORT %s${NC}\n" "$target"
+        else
+            printf "│  ${YELLOW}⚠${NC} Koneksi gagal: %s\n" "${ssh_err:0:120}"
+        fi
+        printf "│  ${BLUE}ℹ${NC}  Wizard tetap lanjut — perbaiki SSH sebelum pakai ODIN.\n"
         return 1
     fi
 }
@@ -247,19 +292,22 @@ detect_existing_config() {
     detect_result=$("$PYTHON" -c "
 import json, sys
 try:
-    d = json.load(open('$claude_json'))
+    d = json.load(open(sys.argv[1]))
     mcp = d.get('mcpServers', {})
     entry = mcp.get('odin')
     if entry and entry.get('args'):
         args = entry['args']
-        host = args[0] if len(args) > 0 else ''
-        path = args[1] if len(args) > 1 else ''
+        # run_path is always the last arg
+        path = args[-1] if args else ''
+        # SSH target is the second-to-last arg (host or user@host)
+        # Skip flags: -p, -o, and their values
+        host = args[-2] if len(args) >= 2 else args[0] if args else ''
         print(f'odin|{host}|{path}')
         sys.exit(0)
     sys.exit(1)
 except Exception:
     sys.exit(1)
-" 2>/dev/null) || return 1
+" "$claude_json" 2>/dev/null) || return 1
 
     EXISTING_MCP_NAME="${detect_result%%|*}"
     local rest="${detect_result#*|}"
@@ -270,7 +318,7 @@ except Exception:
 
 # ── Write MCP config ───────────────────────────────────────────────────────
 write_mcp_config() {
-    local ssh_host="$1" run_path="$2"
+    local ssh_target="$1" run_path="$2" ssh_port="${3:-22}" is_alias="${4:-false}"
     local claude_json="$HOME/.claude.json"
 
     if [ -f "$claude_json" ]; then
@@ -278,7 +326,7 @@ write_mcp_config() {
     fi
 
     "$PYTHON" -c "
-import json, os
+import json, os, sys
 
 claude_json = os.path.expanduser('~/.claude.json')
 try:
@@ -289,16 +337,30 @@ except (FileNotFoundError, json.JSONDecodeError):
 
 mcp = data.setdefault('mcpServers', {})
 
+ssh_target = sys.argv[1]
+run_path = sys.argv[2]
+ssh_port = sys.argv[3]
+is_alias = sys.argv[4] == 'true'
+
+args = []
+if is_alias:
+    args = [ssh_target, run_path]
+else:
+    if ssh_port != '22':
+        args += ['-p', ssh_port]
+    args += ['-o', 'StrictHostKeyChecking=accept-new']
+    args += [ssh_target, run_path]
+
 mcp['odin'] = {
     'type': 'stdio',
     'command': 'ssh',
-    'args': ['$ssh_host', '$run_path']
+    'args': args
 }
 
 with open(claude_json, 'w') as f:
     json.dump(data, f, indent=2)
     f.write('\n')
-"
+" "$ssh_target" "$run_path" "$ssh_port" "$is_alias"
 }
 
 # ── Write guard config ─────────────────────────────────────────────────────
@@ -314,10 +376,10 @@ write_guard_config() {
     fi
 
     "$PYTHON" -c "
-import json, os
+import json, os, sys
 
-settings_path = '$settings_path'
-guard_path = '$guard_path'
+settings_path = sys.argv[1]
+guard_path = sys.argv[2]
 
 ODIN_ALLOW = [
     'mcp__odin__server_info',
@@ -334,7 +396,7 @@ ODIN_HOOK = {
     'matcher': 'mcp__odin__(run_command|service_action|laravel_deploy|run_tests|runbook|inspect_server|memory_write|memory_forget)',
     'hooks': [{
         'type': 'command',
-        'command': f\"python3 '{guard_path}'\",
+        'command': 'python3 ' + repr(guard_path),
         'timeout': 10
     }]
 }
@@ -364,7 +426,7 @@ POST_HOOK = {
     'matcher': 'mcp__odin__inspect_server',
     'hooks': [{
         'type': 'command',
-        'command': f\"python3 '{guard_path}'\",
+        'command': 'python3 ' + repr(guard_path),
         'timeout': 10
     }]
 }
@@ -375,12 +437,19 @@ post.append(POST_HOOK)
 with open(settings_path, 'w') as f:
     json.dump(data, f, indent=2)
     f.write('\n')
-"
+" "$settings_path" "$guard_path"
 }
 
 # ── Setup Wizard ───────────────────────────────────────────────────────────
+# Variabel global untuk sharing antara wizard dan server setup
+WIZ_SSH_HOST=""
+WIZ_SSH_PORT=""
+WIZ_SSH_USER=""
+WIZ_SSH_IS_ALIAS=false
+
 setup_wizard() {
-    local ssh_host="" run_path="" guard_scope="" project_path="" settings_path=""
+    local ssh_host="" ssh_port="22" ssh_user="odin" run_path="" guard_scope=""
+    local project_path="" settings_path="" use_alias=false
     local guard_path="$INSTALL_DIR/client/odin_guard.py"
     local wizard_skipped=false
 
@@ -388,13 +457,16 @@ setup_wizard() {
     printf "${BOLD}${CYAN}  ⚙  Setup Wizard — Konfigurasi Claude Code${NC}\n"
     printf "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n\n"
 
+    printf "  Wizard ini mengkonfigurasi laptop agar Claude Code bisa\n"
+    printf "  terhubung ke ODIN di server Anda via SSH.\n\n"
+    printf "  ${BLUE}ℹ${NC}  Tekan Enter untuk memakai nilai default ${CYAN}[dalam kurung]${NC}.\n\n"
+
     # ── Detect existing ────────────────────────────────────────────────
     if detect_existing_config; then
-        printf "  ${GREEN}✓${NC} Konfigurasi ODIN terdeteksi:\n"
-        printf "      MCP name  : ${CYAN}%s${NC}\n" "$EXISTING_MCP_NAME"
-        printf "      SSH host  : ${CYAN}%s${NC}\n" "$EXISTING_SSH_HOST"
-        printf "      Path      : ${CYAN}%s${NC}\n\n" "$EXISTING_RUN_PATH"
-        printf "${BOLD}  Konfigurasi ulang? [y/N]${NC}: "
+        printf "  ${GREEN}✓${NC} Konfigurasi ODIN sudah ada di laptop ini:\n"
+        printf "      SSH target : ${CYAN}%s${NC}\n" "$EXISTING_SSH_HOST"
+        printf "      Path       : ${CYAN}%s${NC}\n\n" "$EXISTING_RUN_PATH"
+        printf "${BOLD}  Konfigurasi ulang? [y/N] (Enter = tidak)${NC}: "
         read -r reconfig <&"$TTY_FD"
         if [[ ! "$reconfig" =~ ^[Yy]$ ]]; then
             info "Config tidak diubah."
@@ -407,37 +479,89 @@ setup_wizard() {
         run_path="$EXISTING_RUN_PATH"
     fi
 
-    printf "  Wizard ini mengkonfigurasi Claude Code agar terhubung\n"
-    printf "  dengan ODIN di server Anda. Tekan Enter untuk pakai default.\n\n"
-
     # ── Koneksi Server ─────────────────────────────────────────────────
-    printf "┌─ ${BOLD}Koneksi Server${NC} ─────────────────────────────────────\n│\n"
-    printf "│  SSH host/alias server (sesuai ~/.ssh/config atau user@host)\n"
+    printf "┌─ ${BOLD}LANGKAH 1: Koneksi ke Server${NC} ──────────────────────\n│\n"
+    printf "│  ODIN berjalan di server (VPS). Claude Code di laptop\n"
+    printf "│  terhubung ke sana lewat SSH.\n│\n"
+
+    printf "│  Cara koneksi:\n"
+    printf "│  ${CYAN}1)${NC} SSH alias  — pakai nama alias dari ~/.ssh/config\n"
+    printf "│               (port, user, key sudah diatur di sana)\n"
+    printf "│  ${CYAN}2)${NC} IP manual  — masukkan IP/hostname, port, dan user\n│\n"
+
+    local conn_method
+    conn_method=$(ask_choice "Pilihan" 2 "1")
+
+    if [ "$conn_method" = "1" ]; then
+        use_alias=true
+        printf "│\n"
+        printf "│  Masukkan nama alias SSH (contoh: ${CYAN}vps-odin${NC}, ${CYAN}my-server${NC})\n"
+        printf "│  Alias harus sudah ada di ${CYAN}~/.ssh/config${NC}\n│\n"
+        ssh_host=$(ask_input "SSH alias" "${ssh_host:-}")
+        printf "│\n"
+        if is_ssh_alias "$ssh_host"; then
+            printf "│  ${GREEN}✓${NC} Alias ${CYAN}%s${NC} ditemukan di ~/.ssh/config\n" "$ssh_host"
+        else
+            printf "│  ${YELLOW}⚠${NC} Alias ${CYAN}%s${NC} tidak ditemukan di ~/.ssh/config\n" "$ssh_host"
+            printf "│    Pastikan alias sudah diatur sebelum pakai ODIN.\n"
+        fi
+    else
+        use_alias=false
+        printf "│\n"
+        printf "│  IP atau hostname server (contoh: ${CYAN}192.168.1.100${NC}, ${CYAN}server.com${NC})\n│\n"
+        ssh_host=$(ask_input "Host/IP server" "${ssh_host:-}")
+        printf "│\n"
+        printf "│  Port SSH server (banyak server pakai port non-standard)\n│\n"
+        ssh_port=$(ask_input "Port SSH" "22")
+        printf "│\n"
+        printf "│  User SSH untuk ODIN di server\n"
+        printf "│  (user ini dibuat khusus untuk ODIN, bukan user admin)\n│\n"
+        ssh_user=$(ask_input "User SSH" "odin")
+    fi
+
     printf "│\n"
-    ssh_host=$(ask_input "SSH host" "$ssh_host")
+    printf "│  Path launcher ODIN (run.sh) di server\n│\n"
+    run_path=$(ask_input "Path run.sh di server" "${run_path:-/home/odin/run.sh}")
     printf "│\n"
-    printf "│  Path run.sh di server\n"
-    run_path=$(ask_input "Path run.sh" "${run_path:-/home/odin/run.sh}")
-    printf "│\n"
-    test_ssh "$ssh_host" "$run_path" || true
+
+    # Test koneksi
+    if [ "$use_alias" = true ]; then
+        test_ssh "$ssh_host" "$run_path" "" "" || true
+    else
+        test_ssh "$ssh_host" "$run_path" "$ssh_port" "$ssh_user" || true
+    fi
     printf "│\n└──────────────────────────────────────────────────────\n\n"
 
+    # Simpan ke global untuk server setup
+    WIZ_SSH_HOST="$ssh_host"
+    WIZ_SSH_PORT="$ssh_port"
+    WIZ_SSH_USER="$ssh_user"
+    WIZ_SSH_IS_ALIAS="$use_alias"
+
     # ── Scope Guard ────────────────────────────────────────────────────
-    printf "┌─ ${BOLD}Scope Guard Hook${NC} ────────────────────────────────────\n│\n"
-    printf "│  Guard hook bisa dipasang global atau per-project.\n│\n"
-    printf "│  ${CYAN}1)${NC} Global  — berlaku untuk semua project Claude Code\n"
-    printf "│  ${CYAN}2)${NC} Project — hanya untuk satu project directory\n│\n"
+    printf "┌─ ${BOLD}LANGKAH 2: Proteksi Guard${NC} ─────────────────────────\n│\n"
+    printf "│  Guard adalah lapisan keamanan yang menampilkan peringatan\n"
+    printf "│  sebelum perintah berbahaya dijalankan di server.\n│\n"
+    printf "│  ${CYAN}1)${NC} Global (disarankan)  — guard aktif di semua project\n"
+    printf "│     Artinya: kapanpun Claude Code dipakai, perintah ke\n"
+    printf "│     server selalu melalui guard. Paling aman.\n│\n"
+    printf "│  ${CYAN}2)${NC} Per-project           — guard hanya aktif di satu\n"
+    printf "│     direktori project tertentu.\n"
+    printf "│     ${YELLOW}⚠ Peringatan: di project lain ODIN tetap bisa diakses${NC}\n"
+    printf "│     ${YELLOW}  tapi TANPA proteksi guard.${NC}\n│\n"
     guard_scope=$(ask_choice "Pilihan" 2 "1")
 
     if [ "$guard_scope" = "2" ]; then
         printf "│\n"
+        printf "│  Masukkan path direktori project yang ingin diproteksi.\n"
+        printf "│  Contoh: ${CYAN}/Users/anda/Projects/webapp${NC}\n│\n"
         while true; do
             project_path=$(ask_input "Path project" "")
             if [ -d "$project_path" ]; then
-                printf "│  ${GREEN}✓${NC} Direktori valid\n"
+                printf "│  ${GREEN}✓${NC} Direktori ${CYAN}%s${NC} valid\n" "$project_path"
                 break
             fi
-            warn "Direktori '$project_path' tidak ditemukan."
+            printf "${YELLOW}⚠${NC} Direktori '%s' tidak ditemukan. Coba lagi.\n" "$project_path" >/dev/tty
         done
         settings_path="${project_path}/.claude/settings.json"
     else
@@ -446,20 +570,25 @@ setup_wizard() {
     printf "│\n└──────────────────────────────────────────────────────\n\n"
 
     # ── Konfirmasi ─────────────────────────────────────────────────────
-    printf "┌─ ${BOLD}Konfirmasi${NC} ─────────────────────────────────────────\n│\n"
-    printf "│  SSH host        : ${CYAN}%s${NC}\n" "$ssh_host"
-    printf "│  Path run.sh     : ${CYAN}%s${NC}\n" "$run_path"
-    if [ "$guard_scope" = "2" ]; then
-        printf "│  Guard scope     : ${CYAN}Project${NC} (%s)\n" "$project_path"
+    printf "┌─ ${BOLD}LANGKAH 3: Konfirmasi${NC} ─────────────────────────────\n│\n"
+    printf "│  ${BOLD}Ringkasan konfigurasi:${NC}\n│\n"
+    if [ "$use_alias" = true ]; then
+        printf "│  SSH koneksi    : alias ${CYAN}%s${NC}\n" "$ssh_host"
     else
-        printf "│  Guard scope     : ${CYAN}Global${NC}\n"
+        printf "│  SSH koneksi    : ${CYAN}%s@%s${NC} port ${CYAN}%s${NC}\n" "$ssh_user" "$ssh_host" "$ssh_port"
+    fi
+    printf "│  Path run.sh    : ${CYAN}%s${NC}\n" "$run_path"
+    if [ "$guard_scope" = "2" ]; then
+        printf "│  Guard scope    : ${CYAN}Project${NC} → %s\n" "$project_path"
+    else
+        printf "│  Guard scope    : ${CYAN}Global${NC} (semua project)\n"
     fi
     printf "│\n"
-    printf "│  File yang akan ditulis:\n"
-    printf "│    • ${CYAN}~/.claude.json${NC}          (mcpServers.odin)\n"
-    printf "│    • ${CYAN}%s${NC}\n" "$settings_path"
+    printf "│  File yang akan ditulis (backup .bak dibuat otomatis):\n"
+    printf "│    • ${CYAN}~/.claude.json${NC}  → koneksi MCP ke server\n"
+    printf "│    • ${CYAN}%s${NC}  → guard hook\n" "$settings_path"
     printf "│\n"
-    printf "${BOLD}│  Tulis konfigurasi? [Y/n]${NC}: "
+    printf "${BOLD}│  Tulis konfigurasi? [Y/n] (Enter = ya)${NC}: "
     read -r confirm <&"$TTY_FD"
     if [[ "$confirm" =~ ^[Nn]$ ]]; then
         info "Dibatalkan — konfigurasi tidak ditulis."
@@ -471,8 +600,12 @@ setup_wizard() {
 
     # ── Tulis config ───────────────────────────────────────────────────
     info "Menulis MCP config ke ~/.claude.json..."
-    if write_mcp_config "$ssh_host" "$run_path"; then
-        ok "mcpServers.odin ditambahkan (existing config dipertahankan)"
+    local mcp_target="$ssh_host"
+    if [ "$use_alias" = false ]; then
+        mcp_target="${ssh_user}@${ssh_host}"
+    fi
+    if write_mcp_config "$mcp_target" "$run_path" "$ssh_port" "$use_alias"; then
+        ok "mcpServers.odin ditambahkan (config lama di-backup ke .bak)"
     else
         err "Gagal menulis ~/.claude.json — periksa file format dan permissions"
         WIZARD_DONE=false
@@ -488,20 +621,56 @@ setup_wizard() {
         return
     fi
 
+    # ── Verifikasi koneksi sebagai user odin ───────────────────────────
+    printf "\n"
+    info "Menguji koneksi SSH sebagai user odin (MCP runtime)..."
+    local verify_args=(-o ConnectTimeout=5)
+    if [ "$use_alias" = true ]; then
+        verify_args+=("$ssh_host")
+    else
+        [ "$ssh_port" != "22" ] && verify_args+=(-p "$ssh_port")
+        verify_args+=("${ssh_user}@${ssh_host}")
+    fi
+
+    printf "  ${BLUE}▸${NC} Perintah: ${CYAN}ssh %s echo ok${NC}\n" "${verify_args[*]}"
+    if ssh "${verify_args[@]}" "echo ok" >/dev/null 2>&1; then
+        ok "Koneksi SSH sebagai odin berhasil — MCP siap digunakan"
+    else
+        warn "Koneksi SSH sebagai odin belum bisa."
+        printf "  ${YELLOW}⚠${NC}  MCP akan ${BOLD}gagal${NC} sampai user odin bisa login via SSH.\n"
+        printf "  ${BLUE}ℹ${NC}  Penyebab umum:\n"
+        printf "     • User odin belum ada di server (jalankan Setup Server)\n"
+        printf "     • Password/SSH key belum di-set untuk user odin\n"
+        printf "     • Port SSH salah\n"
+        printf "  ${BLUE}ℹ${NC}  Setelah setup server, coba manual:\n"
+        printf "     ${CYAN}ssh %s echo ok${NC}\n" "${verify_args[*]}"
+    fi
+
     WIZARD_DONE=true
 }
 
 # ── SSH ControlMaster ──────────────────────────────────────────────────────
 SSH_CTRL_SOCK=""
 SSH_CTRL_HOST=""
+SSH_CTRL_PORT=""
 
 ssh_open() {
-    local host="$1"
+    local host="$1" port="${2:-}"
     SSH_CTRL_HOST="$host"
+    SSH_CTRL_PORT="$port"
     SSH_CTRL_SOCK="/tmp/odin-ssh-$$"
-    printf "  ${BLUE}▸${NC} Membuka koneksi SSH ke ${CYAN}%s${NC}...\n" "$host"
+
+    local port_args=()
+    local display_str="$host"
+    if [ -n "$port" ] && [ "$port" != "22" ]; then
+        port_args=(-p "$port")
+        display_str="$host port $port"
+    fi
+
+    printf "  ${BLUE}▸${NC} Membuka koneksi SSH ke ${CYAN}%s${NC}...\n" "$display_str"
     printf "    ${YELLOW}(Masukkan password jika diminta — hanya 1x untuk seluruh proses)${NC}\n"
-    ssh -o ControlMaster=yes -o ControlPath="$SSH_CTRL_SOCK" \
+    ssh "${port_args[@]}" \
+        -o ControlMaster=yes -o ControlPath="$SSH_CTRL_SOCK" \
         -o ControlPersist=300 -o ConnectTimeout=10 \
         -o ServerAliveInterval=30 \
         -fN "$host" || return 1
@@ -518,7 +687,11 @@ ssh_run_tty() {
 }
 
 ssh_upload() {
-    scp -q -o ControlPath="$SSH_CTRL_SOCK" "$1" "${SSH_CTRL_HOST}:$2"
+    local port_args=()
+    if [ -n "$SSH_CTRL_PORT" ] && [ "$SSH_CTRL_PORT" != "22" ]; then
+        port_args=(-P "$SSH_CTRL_PORT")
+    fi
+    scp -q "${port_args[@]}" -o ControlPath="$SSH_CTRL_SOCK" "$1" "${SSH_CTRL_HOST}:$2"
 }
 
 ssh_close() {
@@ -526,57 +699,86 @@ ssh_close() {
         ssh -o ControlPath="$SSH_CTRL_SOCK" -O exit "$SSH_CTRL_HOST" 2>/dev/null || true
         SSH_CTRL_SOCK=""
         SSH_CTRL_HOST=""
+        SSH_CTRL_PORT=""
     fi
 }
 
 # ── Server Setup ───────────────────────────────────────────────────────────
 setup_server() {
-    local admin_host="" project_root="" log_dirs="" deploy_mode=""
+    local admin_host="" admin_port="" project_root="" log_dirs="" deploy_mode=""
 
     printf "\n${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
-    printf "${BOLD}${CYAN}  Setup Server — Push via SSH${NC}\n"
+    printf "${BOLD}${CYAN}  Setup Server — Install ODIN di Server via SSH${NC}\n"
     printf "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n\n"
 
-    printf "  Installer akan men-setup ODIN di server via SSH:\n"
-    printf "    ${CYAN}•${NC} Membuat user ${BOLD}odin${NC} (jika belum ada)\n"
-    printf "    ${CYAN}•${NC} Upload odin_agent.py & run.sh\n"
-    printf "    ${CYAN}•${NC} Membuat venv & install mcp[cli]\n"
-    printf "    ${CYAN}•${NC} Set permissions & direktori memory\n\n"
+    printf "  Proses ini akan melakukan hal berikut di server:\n"
+    printf "    ${CYAN}1.${NC} Membuat user ${BOLD}odin${NC} (user khusus, bukan admin)\n"
+    printf "    ${CYAN}2.${NC} Upload odin_agent.py & generate run.sh\n"
+    printf "    ${CYAN}3.${NC} Membuat Python venv & install dependensi mcp[cli]\n"
+    printf "    ${CYAN}4.${NC} Set permissions & direktori memory\n"
+    printf "    ${CYAN}5.${NC} Set password/SSH key untuk user odin\n\n"
+    printf "  ${BLUE}ℹ${NC}  Tekan Enter untuk memakai nilai default ${CYAN}[dalam kurung]${NC}.\n\n"
 
     # ── Input: Koneksi ──────────────────────────────────────────────────
-    printf "┌─ ${BOLD}Koneksi Admin${NC} ──────────────────────────────────────\n│\n"
-    printf "│  SSH user dengan akses root/sudo di server\n│\n"
-    admin_host=$(ask_input "SSH user@host" "root@")
+    printf "┌─ ${BOLD}Koneksi Admin ke Server${NC} ─────────────────────────\n│\n"
+    printf "│  Untuk install ODIN, perlu login ke server sebagai user\n"
+    printf "│  yang punya akses ${BOLD}root${NC} atau ${BOLD}sudo${NC}.\n│\n"
+
+    # Pre-fill dari wizard jika ada
+    local default_admin="" default_port="22"
+    if [ -n "$WIZ_SSH_HOST" ]; then
+        default_admin="root@${WIZ_SSH_HOST}"
+        default_port="$WIZ_SSH_PORT"
+        printf "│  ${BLUE}ℹ${NC}  Dari wizard: host ${CYAN}%s${NC}, port ${CYAN}%s${NC}\n│\n" "$WIZ_SSH_HOST" "$WIZ_SSH_PORT"
+    fi
+
+    printf "│  Format: ${CYAN}user@host${NC} (contoh: ${CYAN}root@192.168.1.100${NC})\n"
+    printf "│  Atau SSH alias jika ada (contoh: ${CYAN}vps-admin${NC})\n│\n"
+    admin_host=$(ask_input "SSH admin" "${default_admin:-root@}")
+    printf "│\n"
+    printf "│  Port SSH server (sama dengan port di wizard)\n│\n"
+    admin_port=$(ask_input "Port SSH" "$default_port")
     printf "│\n└──────────────────────────────────────────────────────\n\n"
 
     # ── Input: Konfigurasi ──────────────────────────────────────────────
-    printf "┌─ ${BOLD}Konfigurasi Aplikasi${NC} ──────────────────────────────\n│\n"
-    printf "│  Path root aplikasi web di server\n│\n"
+    printf "┌─ ${BOLD}Konfigurasi Aplikasi di Server${NC} ────────────────────\n│\n"
+
+    printf "│  ${BOLD}PROJECT_ROOT${NC} — direktori utama aplikasi web Anda.\n"
+    printf "│  Tempat file aplikasi berada (artisan, manage.py, dll).\n"
+    printf "│  Contoh: ${CYAN}/var/www/simuru${NC}, ${CYAN}/var/www/html${NC}\n│\n"
     project_root=$(ask_input "PROJECT_ROOT" "/var/www/html")
-    printf "│\n│  Direktori log yang boleh dibaca (pisah koma)\n│\n"
-    log_dirs=$(ask_input "ALLOWED_LOG_DIRS" "/var/log,/var/www")
-    printf "│\n│  Mode operasi:\n│\n"
-    printf "│  ${CYAN}1)${NC} local — project sudah ada di server\n"
-    printf "│  ${CYAN}2)${NC} git   — deploy via git pull\n│\n"
+
+    printf "│\n│  ${BOLD}ALLOWED_LOG_DIRS${NC} — direktori log yang boleh dibaca ODIN.\n"
+    printf "│  Pisahkan dengan koma jika lebih dari satu.\n"
+    printf "│  Contoh umum: ${CYAN}/var/log/nginx${NC}, ${CYAN}/var/log/mysql${NC},\n"
+    printf "│               ${CYAN}/var/www/app/storage/logs${NC}\n│\n"
+    log_dirs=$(ask_input "ALLOWED_LOG_DIRS" "/var/log,${project_root}")
+
+    printf "│\n│  ${BOLD}DEPLOY_MODE${NC} — cara ODIN mengelola deploy aplikasi:\n│\n"
+    printf "│  ${CYAN}1)${NC} local — Aplikasi di-deploy manual atau oleh CI/CD lain.\n"
+    printf "│           ODIN hanya memantau, restart, dan maintain.\n│\n"
+    printf "│  ${CYAN}2)${NC} git   — ODIN bisa menjalankan deploy otomatis:\n"
+    printf "│           git pull → migrate → cache clear → restart.\n"
+    printf "│           Cocok jika repo sudah di-clone di server.\n│\n"
     local mode_choice
     mode_choice=$(ask_choice "Pilihan" 2 "1")
     [ "$mode_choice" = "2" ] && deploy_mode="git" || deploy_mode="local"
     printf "│\n└──────────────────────────────────────────────────────\n\n"
 
     # ── Konfirmasi ──────────────────────────────────────────────────────
-    printf "┌─ ${BOLD}Ringkasan${NC} ──────────────────────────────────────────\n│\n"
+    printf "┌─ ${BOLD}Ringkasan Setup Server${NC} ────────────────────────────\n│\n"
     printf "│  Admin SSH      : ${CYAN}%s${NC}\n" "$admin_host"
     printf "│  PROJECT_ROOT   : ${CYAN}%s${NC}\n" "$project_root"
     printf "│  LOG_DIRS       : ${CYAN}%s${NC}\n" "$log_dirs"
     printf "│  DEPLOY_MODE    : ${CYAN}%s${NC}\n" "$deploy_mode"
     printf "│\n"
     printf "│  Akan dibuat di server:\n"
-    printf "│    ${CYAN}/home/odin/odin_agent.py${NC}  (600)\n"
-    printf "│    ${CYAN}/home/odin/run.sh${NC}         (755)\n"
-    printf "│    ${CYAN}/home/odin/.venv/${NC}           (Python venv)\n"
-    printf "│    ${CYAN}/home/odin/memory/${NC}          (700)\n"
+    printf "│    ${CYAN}/home/odin/odin_agent.py${NC}  (600) — MCP agent\n"
+    printf "│    ${CYAN}/home/odin/run.sh${NC}         (755) — launcher + env vars\n"
+    printf "│    ${CYAN}/home/odin/.venv/${NC}                — Python virtualenv\n"
+    printf "│    ${CYAN}/home/odin/memory/${NC}          (700) — persistent memory\n"
     printf "│\n"
-    printf "${BOLD}│  Lanjutkan? [Y/n]${NC}: "
+    printf "${BOLD}│  Lanjutkan? [Y/n] (Enter = ya)${NC}: "
     local confirm
     read -r confirm <&"$TTY_FD"
     if [[ "$confirm" =~ ^[Nn]$ ]]; then
@@ -588,8 +790,8 @@ setup_server() {
     printf "│\n└──────────────────────────────────────────────────────\n\n"
 
     # ── Buka koneksi SSH (satu kali password) ───────────────────────────
-    if ! ssh_open "$admin_host"; then
-        err "Gagal koneksi SSH — periksa host, user, dan password."
+    if ! ssh_open "$admin_host" "$admin_port"; then
+        err "Gagal koneksi SSH — periksa host, port, user, dan password."
         SERVER_DONE=false
         return
     fi
@@ -717,25 +919,49 @@ RUNEOF
     fi
     rm -f "$tmp_run"
 
-    # ── 8. Password odin ────────────────────────────────────────────────
-    printf "\n  ${BOLD}Password user odin${NC}\n"
-    printf "  Claude Code terhubung ke server sebagai user odin via SSH.\n"
-    printf "  User odin perlu password untuk login SSH.\n\n"
-    printf "  ${CYAN}1)${NC} Set password sekarang (interaktif)\n"
-    printf "  ${CYAN}2)${NC} Lewati (set nanti: ${CYAN}sudo passwd odin${NC})\n\n"
-    local pw_choice
-    pw_choice=$(ask_choice "Pilihan" 2 "1")
-    if [ "$pw_choice" = "1" ]; then
+    # ── 8. Autentikasi SSH user odin ───────────────────────────────────
+    printf "\n  ${BOLD}Autentikasi SSH user odin${NC}\n"
+    printf "  Claude Code akan terhubung ke server sebagai user ${CYAN}odin${NC}.\n"
+    printf "  User ini perlu cara login — pilih salah satu:\n\n"
+    printf "  ${CYAN}1)${NC} Set password  — sederhana, langsung bisa dipakai\n"
+    printf "  ${CYAN}2)${NC} Setup SSH key — lebih aman, tanpa ketik password\n"
+    printf "                    (copy public key dari laptop ke server)\n"
+    printf "  ${CYAN}3)${NC} Lewati        — atur nanti secara manual\n"
+    printf "                    (${CYAN}sudo passwd odin${NC} atau copy SSH key)\n\n"
+    local auth_choice
+    auth_choice=$(ask_choice "Pilihan" 3 "1")
+    if [ "$auth_choice" = "1" ]; then
         printf "\n"
         if ssh_run_tty "${pp}passwd odin"; then
             ok "  Password odin di-set"
         else
             warn "  Gagal set password — jalankan manual di server: ${CYAN}sudo passwd odin${NC}"
         fi
+    elif [ "$auth_choice" = "2" ]; then
+        printf "\n"
+        local pubkey_path="$HOME/.ssh/id_rsa.pub"
+        if [ ! -f "$pubkey_path" ]; then
+            pubkey_path="$HOME/.ssh/id_ed25519.pub"
+        fi
+        if [ -f "$pubkey_path" ]; then
+            local pubkey
+            pubkey=$(cat "$pubkey_path")
+            printf "  ${BLUE}▸${NC} Meng-copy public key ke server...\n"
+            if ssh_run "${pp}mkdir -p /home/odin/.ssh && chmod 700 /home/odin/.ssh && echo '$pubkey' >> /home/odin/.ssh/authorized_keys && chmod 600 /home/odin/.ssh/authorized_keys && chown -R odin:odin /home/odin/.ssh" 2>/dev/null; then
+                ok "  SSH key berhasil di-copy (${pubkey_path})"
+            else
+                warn "  Gagal copy SSH key — coba manual:"
+                printf "    ${CYAN}ssh-copy-id -i %s odin@server${NC}\n" "$pubkey_path"
+            fi
+        else
+            warn "  SSH key tidak ditemukan di laptop (~/.ssh/id_*.pub)"
+            printf "    Buat dulu: ${CYAN}ssh-keygen -t ed25519${NC}\n"
+            printf "    Lalu copy: ${CYAN}ssh-copy-id odin@server${NC}\n"
+        fi
     fi
 
-    # ── 9. Verifikasi ───────────────────────────────────────────────────
-    printf "\n  ${BLUE}▸${NC} Verifikasi... "
+    # ── 9. Verifikasi file server ──────────────────────────────────────
+    printf "\n  ${BLUE}▸${NC} Verifikasi file di server... "
     local all_ok=true
     ssh_run "test -f /home/odin/odin_agent.py" 2>/dev/null || all_ok=false
     ssh_run "test -f /home/odin/run.sh" 2>/dev/null || all_ok=false
@@ -745,6 +971,63 @@ RUNEOF
         printf "${GREEN}✓ Semua file & direktori OK${NC}\n"
     else
         printf "${YELLOW}⚠ Ada yang kurang — periksa manual${NC}\n"
+    fi
+
+    # ── 10. E2E: Test koneksi sebagai user odin dari laptop ─────────────
+    printf "\n  ${BOLD}Verifikasi MCP (End-to-End)${NC}\n"
+    printf "  Test apakah laptop bisa SSH ke server sebagai user odin.\n"
+    printf "  (Ini yang akan dilakukan Claude Code setiap session)\n\n"
+
+    # Bangun SSH command sama seperti yang akan dipakai Claude Code
+    local e2e_args=(-o ConnectTimeout=10 -o BatchMode=yes)
+    if [ -n "$WIZ_SSH_HOST" ] && [ "$WIZ_SSH_IS_ALIAS" = "true" ]; then
+        e2e_args+=("$WIZ_SSH_HOST")
+    elif [ -n "$WIZ_SSH_HOST" ]; then
+        [ "$WIZ_SSH_PORT" != "22" ] && e2e_args+=(-p "$WIZ_SSH_PORT")
+        e2e_args+=("${WIZ_SSH_USER:-odin}@${WIZ_SSH_HOST}")
+    else
+        local odin_host="${admin_host#*@}"
+        [ "$admin_port" != "22" ] && e2e_args+=(-p "$admin_port")
+        e2e_args+=("odin@${odin_host}")
+    fi
+
+    printf "  ${BLUE}▸${NC} Test: ${CYAN}ssh %s echo ok${NC}\n" "${e2e_args[*]}"
+
+    local e2e_result
+    e2e_result=$(ssh "${e2e_args[@]}" "echo MCP_OK && test -x /home/odin/run.sh && echo RUN_OK && python3 --version" 2>&1)
+    local e2e_rc=$?
+
+    if [ $e2e_rc -eq 0 ] && echo "$e2e_result" | grep -q "MCP_OK"; then
+        ok "  SSH sebagai odin berhasil!"
+        if echo "$e2e_result" | grep -q "RUN_OK"; then
+            printf "  ${GREEN}✓${NC} run.sh ditemukan dan executable\n"
+        fi
+        local py_ver
+        py_ver=$(echo "$e2e_result" | grep -i "python" | head -1)
+        [ -n "$py_ver" ] && printf "  ${GREEN}✓${NC} %s\n" "$py_ver"
+        printf "\n  ${GREEN}✓${NC} ${BOLD}MCP siap digunakan!${NC} Buka Claude Code dan coba:\n"
+        printf "    ${CYAN}\"cek status server\"${NC}\n"
+    else
+        warn "  SSH sebagai odin gagal — MCP belum bisa berjalan."
+        if echo "$e2e_result" | grep -qi "permission denied"; then
+            printf "  ${YELLOW}⚠${NC}  Login ditolak — password/key user odin belum benar.\n"
+        else
+            printf "  ${YELLOW}⚠${NC}  Error: %s\n" "${e2e_result:0:150}"
+        fi
+        printf "\n  ${BLUE}ℹ${NC}  Cara debug (tanpa BatchMode, agar bisa ketik password):\n"
+        # Rebuild args tanpa BatchMode
+        local dbg_args=(-o ConnectTimeout=10)
+        if [ -n "$WIZ_SSH_HOST" ] && [ "$WIZ_SSH_IS_ALIAS" = "true" ]; then
+            dbg_args+=("$WIZ_SSH_HOST")
+        elif [ -n "$WIZ_SSH_HOST" ]; then
+            [ "$WIZ_SSH_PORT" != "22" ] && dbg_args+=(-p "$WIZ_SSH_PORT")
+            dbg_args+=("${WIZ_SSH_USER:-odin}@${WIZ_SSH_HOST}")
+        else
+            local dbg_host="${admin_host#*@}"
+            [ "$admin_port" != "22" ] && dbg_args+=(-p "$admin_port")
+            dbg_args+=("odin@${dbg_host}")
+        fi
+        printf "     ${CYAN}ssh %s echo ok${NC}\n" "${dbg_args[*]}"
     fi
 
     # ── Selesai ─────────────────────────────────────────────────────────
@@ -794,14 +1077,28 @@ show_config_guide() {
 EOF
 
     printf "\n${YELLOW}2.${NC} ${BOLD}Konfigurasi MCP (Claude Code):${NC}\n"
-    printf "   Tambahkan ke ${CYAN}~/.claude.json${NC} (atau project .claude.json):\n\n"
+    printf "   Tambahkan ke ${CYAN}~/.claude.json${NC}:\n\n"
+    printf "   ${BOLD}Jika pakai SSH alias:${NC}\n"
     cat <<EOF
    {
      "mcpServers": {
        "odin": {
          "type": "stdio",
          "command": "ssh",
-         "args": ["your-server-alias", "/home/odin/run.sh"]
+         "args": ["ssh-alias-anda", "/home/odin/run.sh"]
+       }
+     }
+   }
+EOF
+    printf "\n   ${BOLD}Jika pakai IP + port non-standard:${NC}\n"
+    cat <<EOF
+   {
+     "mcpServers": {
+       "odin": {
+         "type": "stdio",
+         "command": "ssh",
+         "args": ["-p", "2409", "-o", "StrictHostKeyChecking=accept-new",
+                  "odin@192.168.1.100", "/home/odin/run.sh"]
        }
      }
    }
@@ -876,9 +1173,15 @@ main() {
 
     SERVER_DONE=false
     printf "\n"
-    printf "  ${BOLD}Setup ODIN di server juga via SSH? [Y/n]${NC}: "
+    printf "┌─ ${BOLD}Setup Server${NC} ─────────────────────────────────────\n│\n"
+    printf "│  Selain konfigurasi laptop, ODIN juga perlu di-install\n"
+    printf "│  di server (upload agent, buat user odin, install venv).\n│\n"
+    printf "│  ${CYAN}•${NC} Pilih ${BOLD}Ya${NC} jika server belum pernah di-setup untuk ODIN\n"
+    printf "│  ${CYAN}•${NC} Pilih ${BOLD}Tidak${NC} jika server sudah di-setup sebelumnya\n│\n"
+    printf "${BOLD}│  Setup ODIN di server via SSH? [Y/n] (Enter = ya)${NC}: "
     local do_server
     read -r do_server <&"$TTY_FD"
+    printf "│\n└──────────────────────────────────────────────────────\n"
     if [[ ! "$do_server" =~ ^[Nn]$ ]]; then
         setup_server
     fi
