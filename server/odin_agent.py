@@ -53,7 +53,7 @@ Jalan :  python3 odin_agent.py     (dijalankan otomatis oleh Claude Code via MCP
 
 from __future__ import annotations
 
-__version__ = "1.2.1"
+__version__ = "1.3.0"
 
 import atexit
 import fcntl
@@ -95,6 +95,7 @@ DEFAULT_TIMEOUT = int(os.environ.get("DEFAULT_TIMEOUT", "180"))
 MAX_TIMEOUT = int(os.environ.get("MAX_TIMEOUT", "900"))
 OUTPUT_LIMIT = int(os.environ.get("OUTPUT_LIMIT", "20000"))
 CONTEXT_BUDGET = int(os.environ.get("CONTEXT_BUDGET", "5000"))
+CACHE_TTL_READ = int(os.environ.get("CACHE_TTL_READ", "60"))   # detik; 0 = matikan cache
 
 PROJECT_ROOT = os.environ.get("PROJECT_ROOT", "").strip().rstrip("/")
 # Niat user: AKSES PENUH server. PROJECT_ROOT kini hanya DEFAULT cwd (di-set run.sh),
@@ -151,6 +152,64 @@ _SECRET_RE = re.compile("|".join(_SECRET_PATTERNS), re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
+# INOVASI 1 — Result Cache TTL
+# Model sering memanggil perintah status yang sama berulang (server_info, ps,
+# df, free). Cache in-memory per session; key = (command, cwd); TTL dari
+# env CACHE_TTL_READ (default 60 s). Hanya berlaku untuk perintah READ-only
+# yang berhasil. WRITE command selalu melewati cache dan tidak di-cache.
+# Set CACHE_TTL_READ=0 untuk menonaktifkan cache sepenuhnya.
+# ---------------------------------------------------------------------------
+_READ_ONLY_RE = re.compile(
+    r"^\s*("
+    r"df\b|free\b|uptime\b|uname\b|hostname\b|date\b"
+    r"|ps\b|pgrep\b|pidof\b|top\b"
+    r"|cat\b|ls\b|find\b|wc\b|head\b|tail\b|grep\b|awk\b|sort\b|uniq\b"
+    r"|sed\b(?!\s+-i)"                             # sed tanpa -i = read-only
+    r"|git\s+(log|status|diff|show|branch|remote|tag|describe|rev-parse)\b"
+    r"|systemctl\s+(status|is-active|is-enabled|list-units)\b"
+    r"|php\s+(-[vi]|--version)\b|composer\s+--version\b"
+    r"|python[23]?\s+--version\b|node\s+--version\b|npm\s+--version\b"
+    r"|whoami\b|id\b|which\b|type\b|env\b|printenv\b|echo\b"
+    r"|ss\b|netstat\b|ip\b|ping\b|curl\b(?!.*-[XdT])"  # curl GET saja
+    r")",
+    re.IGNORECASE,
+)
+
+_result_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+
+
+def _cache_get(command: str, cwd: str) -> dict | None:
+    """Kembalikan salinan hasil cache jika masih segar, None jika miss/expired/tidak eligible."""
+    if not CACHE_TTL_READ or not _READ_ONLY_RE.match(command):
+        return None
+    key = (command, cwd)
+    entry = _result_cache.get(key)
+    if not entry:
+        return None
+    ts, cached = entry
+    age = time.monotonic() - ts
+    if age > CACHE_TTL_READ:
+        _result_cache.pop(key, None)
+        return None
+    out = dict(cached)
+    out["_cached"] = True
+    out["_cache_age_sec"] = round(age, 1)
+    return out
+
+
+def _cache_set(command: str, cwd: str, result: dict) -> None:
+    """Simpan hasil ke cache jika perintah read-only dan eksekusi sukses."""
+    if not CACHE_TTL_READ or not _READ_ONLY_RE.match(command):
+        return
+    if not result.get("success"):
+        return
+    _result_cache[(command, cwd)] = (time.monotonic(), {
+        k: v for k, v in result.items()
+        if k not in ("_cached", "_cache_age_sec")   # jangan ikutkan meta cache sendiri
+    })
+
+
+# ---------------------------------------------------------------------------
 # Inti: bangun & jalankan perintah (local atau ssh)
 # ---------------------------------------------------------------------------
 def _truncate(text: str) -> str:
@@ -160,25 +219,136 @@ def _truncate(text: str) -> str:
     return f"{text[:half]}\n...[{len(text) - OUTPUT_LIMIT} karakter dipotong]...\n{text[-half:]}"
 
 
+# ---------------------------------------------------------------------------
+# INOVASI 3 — Domain-aware Output Filter
+# _smart_output lama memotong dengan naive head(5)+tail(10): baris kritis di
+# tengah (mis. proses service dari ps aux) ikut terbuang, model terpaksa minta
+# ulang → ekstra round-trip. Filter semantik per jenis perintah DIPRIORITASKAN
+# sebelum fallback head+tail, sehingga hanya baris bermakna yang dikirim.
+# ---------------------------------------------------------------------------
+_SERVICES_KNOWN = frozenset({
+    "nginx", "php-fpm", "php8.", "php7.", "php5.",
+    "mysql", "mysqld", "mariadbd", "mariadb",
+    "odin", "deploy", "syamadmin",
+    "sshd", "fail2ban", "ufw",
+    "redis-server", "memcached",
+    "node", "npm", "python", "uvicorn", "gunicorn",
+    "supervisord", "supervisor",
+    "cron", "atd",
+    "rabbitmq", "celery",
+})
+_SEVERITY_KW = frozenset({
+    "error", "err", "warn", "warning",
+    "fail", "failed", "failure",
+    "crit", "critical", "emerg", "alert",
+    "exception", "traceback", "panic",
+})
+
+
+def _filter_ps(lines: list[str]) -> list[str]:
+    """ps aux/axu: header + baris yang mengandung service dikenal atau user www-data/odin/deploy."""
+    if not lines:
+        return lines
+    header = lines[0]
+    kept = [header]
+    for line in lines[1:]:
+        low = line.lower()
+        if any(svc in low for svc in _SERVICES_KNOWN):
+            kept.append(line)
+        elif re.search(r"\b(www-data|odin|deploy)\b", line):
+            kept.append(line)
+    # Fallback: jika tidak ada yang cocok, kembalikan 15 baris pertama
+    return kept if len(kept) > 1 else lines[:15]
+
+
+def _filter_journal(lines: list[str]) -> list[str]:
+    """journalctl: hanya baris mengandung kata kunci severity; fallback 30 baris terakhir."""
+    filtered = [l for l in lines if any(kw in l.lower() for kw in _SEVERITY_KW)]
+    return filtered[-50:] if filtered else lines[-30:]
+
+
+def _filter_git_log(lines: list[str]) -> list[str]:
+    """git log: batasi ke 40 baris — cukup untuk ~8–10 commit dengan pesan penuh."""
+    return lines[:40]
+
+
+def _filter_find(lines: list[str]) -> list[str]:
+    """find: batasi ke 60 hasil; lebih dari itu biasanya tidak diproses model sekaligus."""
+    return lines[:60]
+
+
+def _filter_env(lines: list[str]) -> list[str]:
+    """env/printenv: buang baris yang terlihat seperti nilai panjang/binary, keep 50."""
+    kept = [l for l in lines if len(l) < 200 and not re.search(r"[^\x09\x20-\x7E]", l)]
+    return kept[:50]
+
+
+# Urutan penting: pattern lebih spesifik duluan.
+_DOMAIN_FILTERS: list[tuple[re.Pattern, "callable[[list[str]], list[str]]"]] = [
+    (re.compile(r"\bps\s+(aux|axu|ax|-e)\b",    re.I), _filter_ps),
+    (re.compile(r"\bjournalctl\b",               re.I), _filter_journal),
+    (re.compile(r"\bgit\s+log\b",               re.I), _filter_git_log),
+    (re.compile(r"\bfind\s+",                   re.I), _filter_find),
+    (re.compile(r"\b(env|printenv)\b",           re.I), _filter_env),
+]
+
+
 def _smart_output(result: dict) -> dict:
-    """Jika stdout > CONTEXT_BUDGET, ganti dengan ringkasan head+tail + _output_meta."""
+    """Kompresi output jika stdout > CONTEXT_BUDGET.
+
+    Urutan:
+    1. Coba domain filter semantik (Inovasi 3) — pertahankan baris bermakna.
+    2. Jika setelah filter masih > CONTEXT_BUDGET, terapkan head+tail fallback.
+    3. Jika tidak ada domain filter cocok, langsung fallback head+tail.
+    """
     stdout = result.get("stdout", "")
     if not stdout or len(stdout) <= CONTEXT_BUDGET:
         return result
+
     lines = stdout.splitlines()
+    total_lines_orig = len(lines)
+    cmd = result.get("command", "")
+    filter_name: str | None = None
+
+    # Tahap 1: domain filter semantik
+    for pattern, fn in _DOMAIN_FILTERS:
+        if pattern.search(cmd):
+            lines = fn(lines)
+            filter_name = fn.__name__
+            break
+
+    joined = "\n".join(lines)
+    if len(joined) <= CONTEXT_BUDGET:
+        # Domain filter cukup — tidak perlu head+tail
+        result["stdout"] = joined
+        result["_output_meta"] = {
+            "total_chars": len(stdout),
+            "total_lines": total_lines_orig,
+            "filtered_lines": len(lines),
+            "filter": filter_name or "none",
+            "truncated": False,
+        }
+        return result
+
+    # Tahap 2: fallback head+tail (domain filter belum cukup atau tidak ada)
     total_lines = len(lines)
     head = lines[:5]
     tail = lines[-10:]
     result["_output_meta"] = {
         "total_chars": len(stdout),
-        "total_lines": total_lines,
+        "total_lines": total_lines_orig,
+        "filtered_lines": total_lines,
+        "filter": filter_name or "none",
         "truncated": True,
         "head_lines": 5,
         "tail_lines": 10,
     }
-    result["stdout"] = "\n".join(head) + \
-        f"\n\n...[{total_lines - 15} baris diringkas — total {total_lines} baris, " \
-        f"{len(stdout)} karakter]...\n\n" + "\n".join(tail)
+    result["stdout"] = (
+        "\n".join(head)
+        + f"\n\n...[{total_lines - 15} baris diringkas — total {total_lines} baris, "
+        f"{len(stdout)} karakter]...\n\n"
+        + "\n".join(tail)
+    )
     return result
 
 
@@ -404,6 +574,54 @@ def _build_summary(result: dict) -> str:
         return f"✓ OK — {cmd}{dur_str}"
     tag = f" [{etype}]" if etype else ""
     return f"✗ GAGAL (exit {result.get('exit_code', '?')}){tag} — {cmd}{dur_str}"
+
+
+# ---------------------------------------------------------------------------
+# INOVASI 2 — Slim Envelope
+# Respons run_command membawa sejumlah field yang nilai-nya konstan di setup
+# local SIMURU (mode=local, ssh_target=null, agent_mode=local) atau tidak
+# informatif untuk READ command (stderr kosong, command sudah diketahui model).
+# WRITE command tetap menerima envelope penuh untuk audit trail yang lengkap.
+# ---------------------------------------------------------------------------
+_WRITE_CMDS_RE = re.compile(
+    r"\b("
+    r"systemctl\s+(restart|start|stop|reload|enable|disable)\b"
+    r"|git\s+(pull|push|reset|checkout|merge|commit|rebase|clean|rm)\b"
+    r"|mv\b|cp\b|rm\b|chmod\b|chown\b|mkdir\b|touch\b|tee\b"
+    r"|sed\s+-i\b"
+    r"|mysql\b|mysqldump\b|mysqladmin\b|mysqlcheck\b"
+    r"|composer\s+(install|update|require|remove|dump-autoload)\b"
+    r"|apt(?:-get)?\s+(install|remove|purge|upgrade|autoremove|dist-upgrade)\b"
+    r"|pip[23]?\s+(install|uninstall|upgrade)\b"
+    r"|npm\s+(install|uninstall|update|ci|run|rebuild)\b"
+    r"|yarn\s+(add|remove|install|upgrade)\b"
+    r"|sudo\s+/usr/local/bin\b"
+    r"|truncate\b|dd\b|mkfs\b|mount\b|umount\b"
+    r"|crontab\b|at\b"
+    r")",
+    re.IGNORECASE,
+)
+
+# Field yang bernilai konstan di setup local — tidak memberikan informasi baru
+_SLIM_DROP_ALWAYS = frozenset({"mode", "agent_mode", "ssh_target"})
+
+
+def _slim(result: dict, command: str) -> dict:
+    """Kembalikan envelope tipis untuk READ command; penuh untuk WRITE/GAGAL.
+
+    Aturan strip:
+    - WRITE atau gagal: kembalikan utuh (audit trail prioritas).
+    - READ sukses: buang mode/agent_mode/ssh_target (konstan) + stderr kosong
+      + field 'command' (model sudah tahu apa yang dipanggil).
+    """
+    if _WRITE_CMDS_RE.search(command) or not result.get("success"):
+        return result
+    return {
+        k: v for k, v in result.items()
+        if k not in _SLIM_DROP_ALWAYS
+        and not (k == "stderr" and not v)
+        and k != "command"
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1220,6 +1438,15 @@ def run_command(command: str, cwd: str = "", timeout: int = DEFAULT_TIMEOUT,
     block = _mode_gate("run_command", command)
     if block:
         return block
+
+    # ── Inovasi 1: cache check untuk READ-only command ───────────────────
+    _cwd_key = cwd or ""
+    cached = _cache_get(command, _cwd_key)
+    if cached:
+        cached["_summary"] = f"✓ CACHE ({cached['_cache_age_sec']}s) — {command}"
+        _session_log("run_command", command, cached)
+        return _slim(cached, command)   # slim juga berlaku untuk cache hit
+
     pre = _capture_pre_state(command, cwd or None)
     result = _run(command, cwd or None, timeout, allow_dangerous)
     analysis = _analyze_output(result)
@@ -1230,9 +1457,15 @@ def run_command(command: str, cwd: str = "", timeout: int = DEFAULT_TIMEOUT,
         result["_rollback_hint"] = rb
     result["_summary"] = _build_summary(result)
     result = _smart_output(result)
+
+    # ── Inovasi 1: simpan ke cache (full, sebelum slim) ──────────────────
+    _cache_set(command, _cwd_key, result)
+
     _audit("run_command", command, result)
     _session_log("run_command", command, result, pre_state=pre or None, rollback=rb or None)
-    return result
+
+    # ── Inovasi 2: slim envelope sebelum return ───────────────────────────
+    return _slim(result, command)
 
 
 @mcp.tool()
