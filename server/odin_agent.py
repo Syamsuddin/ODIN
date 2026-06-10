@@ -53,8 +53,9 @@ Jalan :  python3 odin_agent.py     (dijalankan otomatis oleh Claude Code via MCP
 
 from __future__ import annotations
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
+import atexit
 import fcntl
 import json
 import logging
@@ -62,8 +63,10 @@ import os
 import re
 import secrets
 import shlex
+import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -2039,8 +2042,61 @@ def health_live() -> str:
 
 
 if __name__ == "__main__":
-    log.info("ODIN v%s START | deploy_mode=%s type=%s op_mode=%s target=%s project=%s",
-             __version__,
+    # ── Singleton: bunuh instance lama agar tidak menumpuk ───────────────
+    # Setiap sesi MCP (SSH baru) men-spawn odin_agent.py baru. Tanpa guard,
+    # instance lama yang koneksinya sudah putus tetap hidup dan menumpuk.
+    _PIDFILE = os.path.join(MEMORY_DIR, "odin_agent.pid")
+    os.makedirs(MEMORY_DIR, exist_ok=True)
+
+    def _pid_release(*_):
+        try:
+            with open(_PIDFILE) as _f:
+                if int(_f.read().strip()) == os.getpid():
+                    os.unlink(_PIDFILE)
+        except Exception:
+            pass
+
+    try:
+        with open(_PIDFILE) as _f:
+            _old_pid = int(_f.read().strip())
+        if _old_pid != os.getpid():
+            try:
+                os.kill(_old_pid, signal.SIGTERM)
+                log.info("singleton: SIGTERM → PID %d", _old_pid)
+                time.sleep(1.5)
+                os.kill(_old_pid, signal.SIGKILL)   # paksa jika belum mati
+                log.info("singleton: SIGKILL → PID %d", _old_pid)
+            except ProcessLookupError:
+                pass  # sudah mati duluan — lanjut
+    except (FileNotFoundError, ValueError):
+        pass  # belum ada PID file — first run
+
+    with open(_PIDFILE, "w") as _f:
+        _f.write(str(os.getpid()))
+    atexit.register(_pid_release)
+    signal.signal(signal.SIGTERM, lambda s, f: (_pid_release(), sys.exit(0)))
+
+    # ── Watchdog: exit otomatis saat koneksi SSH induk mati ──────────────
+    # Saat SSH drop mendadak (network putus), stdin TIDAK selalu mengirim EOF.
+    # Watchdog memantau parent PID (sshd); jika mati → proses ini ikut exit.
+    _parent_pid = os.getppid()
+
+    def _watchdog():
+        while True:
+            time.sleep(10)
+            try:
+                os.kill(_parent_pid, 0)   # signal 0 = probe, tidak mengirim signal
+            except ProcessLookupError:
+                log.info("watchdog: parent PID %d gone — exit", _parent_pid)
+                _pid_release()
+                os._exit(0)
+            except PermissionError:
+                pass  # proses masih hidup, tidak punya izin probe
+
+    threading.Thread(target=_watchdog, daemon=True, name="odin-watchdog").start()
+
+    log.info("ODIN v%s START | pid=%d ppid=%d deploy_mode=%s type=%s op_mode=%s target=%s project=%s",
+             __version__, os.getpid(), _parent_pid,
              MODE, _PROFILE.get("type", "?"), _CURRENT_MODE,
              SSH_TARGET or "local", PROJECT_ROOT or "-")
     mcp.run(transport="stdio")
