@@ -4,6 +4,60 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ---
 
+## [1.3.0] — 2026-06-10
+
+### Added — Token Optimization (3 inovasi)
+
+- **Inovasi 1 — Result Cache TTL** (`CACHE_TTL_READ`, default 60 s):
+  - `_READ_ONLY_RE` mencocokkan ~20 jenis perintah read-only (df, ps, git status, systemctl status, cat, ls, dll.)
+  - `_cache_get()`: kembalikan salinan cached result + metadata `_cached` / `_cache_age_sec`
+  - `_cache_set()`: simpan hasil sukses post-filter; cache key = `(command, cwd)`
+  - `run_command`: cache-check sebelum spawn subprocess; hit → return `_slim(cached)` langsung
+  - `CACHE_TTL_READ=0` menonaktifkan cache sepenuhnya
+
+- **Inovasi 2 — Slim Envelope** (strip field konstan untuk READ command):
+  - `_WRITE_CMDS_RE`: deteksi 25+ pola perintah WRITE (systemctl restart, git pull, mv, rm, mysql*, composer install, apt install, dll.)
+  - `_slim()`: READ sukses → strip `mode` / `agent_mode` / `ssh_target` (konstan di local) + `stderr` kosong + `command`; WRITE/GAGAL → kembalikan envelope penuh untuk audit trail
+  - Estimasi hemat ~25–40 token per READ call; berlaku juga untuk cache hit
+
+- **Inovasi 3 — Domain-aware Output Filter** (ganti naive head+tail):
+  - `_filter_ps`: `ps aux` → header + baris service dikenal (`_SERVICES_KNOWN`) + user www-data/odin/deploy
+  - `_filter_journal`: `journalctl` → hanya baris mengandung ERROR/WARN/FAIL/CRIT/EMERG
+  - `_filter_git_log`: `git log` → batasi 40 baris
+  - `_filter_find`: `find` → batasi 60 hasil
+  - `_filter_env`: `env`/`printenv` → buang baris panjang/binary, batasi 50 baris
+  - `_smart_output`: jalankan domain filter dulu; jika masih > `CONTEXT_BUDGET` → head+tail fallback; `_output_meta` kini mencantumkan `filter` yang dipakai
+
+### Fixed
+
+- **Singleton guard + SSH watchdog** (dari v1.2.1, dipisah entri):
+  - PID file `MEMORY_DIR/odin_agent.pid`: instance baru SIGTERM→SIGKILL instance lama (new instance always wins)
+  - Watchdog thread: probe parent PID (sshd) tiap 10 detik; jika mati → exit + cleanup PID file
+  - `atexit` + `SIGTERM` handler untuk cleanup PID file saat exit normal
+
+### Changed
+
+- `odin_agent.py`: 2046 → 2335 baris (+289)
+- `odin_guard.py`: versi sinkron 1.2.0 → 1.3.0
+- Env var baru: `CACHE_TTL_READ` (default 60)
+- Import baru di `odin_agent.py`: `atexit`, `signal`, `threading`
+
+---
+
+## [1.2.1] — 2026-06-10
+
+### Fixed
+
+- **Singleton guard**: PID file di `MEMORY_DIR/odin_agent.pid`; setiap instance baru membunuh instance lama (SIGTERM → 1.5 s → SIGKILL) sebelum start. Mencegah akumulasi orphan process saat koneksi MCP drop + reconnect berulang.
+- **SSH watchdog thread**: probe `os.kill(parent_pid, 0)` tiap 10 detik; jika parent sshd mati (SSH drop mendadak tanpa EOF), proses ODIN exit otomatis + cleanup PID file.
+- **Logging startup**: `log.info` kini mencantumkan `pid` dan `ppid` untuk debugging koneksi.
+
+### Root cause
+
+Ditemukan 8 orphan `odin_agent.py` berjalan bersamaan (+ 1 PHP runaway 200% CPU). Setiap sesi MCP baru men-spawn proses baru via SSH tanpa mekanisme cleanup proses lama. `mcp.run(transport="stdio")` tidak selalu exit saat SSH drop mendadak (stdin tidak selalu mengirim EOF).
+
+---
+
 ## [1.2.0] — 2026-06-08
 
 ### Added — Fase 1: Safety Net

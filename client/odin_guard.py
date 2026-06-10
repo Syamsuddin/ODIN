@@ -20,7 +20,7 @@ Pada error apa pun -> exit 0 tanpa output (jangan memblokir karena bug guard).
 import json
 import os
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 import re
 import subprocess
 import sys

@@ -485,7 +485,7 @@ Filosofi: READ auto-approve, WRITE wajib konfirmasi, katastrofik double-brake. G
 
 ## Lisensi & Versi
 
-Versi aktif: **1.1.0** — tersimpan di `__version__` pada kedua file Python.
+Versi aktif: **1.3.0** — tersimpan di `__version__` pada kedua file Python.
 Lihat [CHANGELOG.md](CHANGELOG.md) untuk riwayat perubahan lengkap.
 
-*ODIN v1.2 — ringan, cerdas, aman. Satu file di server, satu file di laptop, otak Claude.*
+*ODIN v1.3 — ringan, cerdas, aman. Satu file di server, satu file di laptop, otak Claude.*
