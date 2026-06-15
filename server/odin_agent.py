@@ -53,12 +53,13 @@ Jalan :  python3 odin_agent.py     (dijalankan otomatis oleh Claude Code via MCP
 
 from __future__ import annotations
 
-__version__ = "1.3.0"
+__version__ = "2.1.0"
 
 import atexit
 import fcntl
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -68,6 +69,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from mcp.server.fastmcp import FastMCP
@@ -98,6 +100,7 @@ CONTEXT_BUDGET = int(os.environ.get("CONTEXT_BUDGET", "5000"))
 CACHE_TTL_READ = int(os.environ.get("CACHE_TTL_READ", "60"))   # detik; 0 = matikan cache
 
 PROJECT_ROOT = os.environ.get("PROJECT_ROOT", "").strip().rstrip("/")
+PROJECT_NAME = os.environ.get("PROJECT_NAME", "").strip()
 # Niat user: AKSES PENUH server. PROJECT_ROOT kini hanya DEFAULT cwd (di-set run.sh),
 # BUKAN pagar. Gerbang keamanan = konfirmasi WRITE + kartu risiko (PreToolUse hook) +
 # hard-block katastrofik di bawah. Set LOCK_CWD_TO_PROJECT=1 utk mengembalikan kurungan.
@@ -116,7 +119,21 @@ MEMORY_DIR = os.environ.get(
 MEMORY_FILE = os.path.join(MEMORY_DIR, "memory.jsonl")
 MEMORY_MAX_TEXT = int(os.environ.get("MEMORY_MAX_TEXT", "4000"))
 MEMORY_MAX_ENTRIES = int(os.environ.get("MEMORY_MAX_ENTRIES", "2000"))
-MEMORY_NAMESPACES = ("server", "instruction", "profile")
+STALE_DAYS = int(os.environ.get("STALE_DAYS", "30"))
+DIGEST_BUDGET = int(os.environ.get("DIGEST_BUDGET", "3000"))
+
+# ----- Cortex: global memory lintas-project (consciousness layer) ----------
+GLOBAL_MEMORY_DIR = os.environ.get(
+    "GLOBAL_MEMORY_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory", "_cortex"),
+).strip().rstrip("/")
+GLOBAL_MEMORY_FILE = os.path.join(GLOBAL_MEMORY_DIR, "memory.jsonl")
+GLOBAL_EVENTS_FILE = os.path.join(GLOBAL_MEMORY_DIR, "events.jsonl")
+EVENTS_DIGEST_HOURS = int(os.environ.get("EVENTS_DIGEST_HOURS", "24"))
+
+CORTEX_NAMESPACES = ("profile", "cross")
+PROJECT_NAMESPACES = ("server", "instruction")
+MEMORY_NAMESPACES = CORTEX_NAMESPACES + PROJECT_NAMESPACES
 
 # ----- Audit log (jejak eksekusi append-only — JANGAN dihapus) ----------------
 AUDIT_FILE = os.path.join(MEMORY_DIR, "audit.jsonl")
@@ -637,6 +654,7 @@ def _audit(tool: str, summary: str, result: dict) -> None:
         "tool": tool, "summary": summary[:500],
         "success": result.get("success"), "exit_code": result.get("exit_code"),
         "duration_sec": result.get("duration_sec"), "mode": MODE,
+        "project": PROJECT_NAME or None,
     }
     try:
         os.makedirs(MEMORY_DIR, mode=0o700, exist_ok=True)
@@ -731,6 +749,101 @@ def _slug(text: str) -> str:
     return s[:60] or "x"
 
 
+# ---------------------------------------------------------------------------
+# SEMANTIC SEARCH ENGINE — TF-IDF ringan, stdlib-only, tanpa dependency.
+# Dipakai oleh memory_recall (ranking cerdas) dan memory_write (deteksi duplikat).
+# ---------------------------------------------------------------------------
+_STOP_WORDS = frozenset({
+    "dan", "di", "ke", "dari", "yang", "ini", "itu", "dengan", "untuk",
+    "pada", "adalah", "atau", "juga", "sudah", "akan", "bisa", "ada",
+    "tidak", "ya", "oleh", "jika", "maka", "saat", "telah", "bagi",
+    "harus", "dalam", "secara", "agar", "karena", "belum", "lagi",
+    "masih", "lebih", "sangat", "semua", "hanya", "saja", "setiap",
+    "the", "is", "are", "was", "be", "been", "have", "has", "had",
+    "do", "does", "did", "will", "would", "could", "should", "can",
+    "to", "of", "in", "for", "on", "with", "at", "by", "from",
+    "and", "but", "or", "not", "so", "if", "then", "an", "as",
+    "this", "that", "these", "those", "it", "its", "may", "might",
+})
+_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9._-]*[a-z0-9]|[a-z0-9]+")
+
+
+def _tokenize(text: str) -> list[str]:
+    return [w for w in _TOKEN_RE.findall(text.lower()) if w not in _STOP_WORDS]
+
+
+def _entry_text(rec: dict) -> str:
+    parts = [rec.get("key") or "", rec.get("text") or ""]
+    parts.extend(str(t) for t in (rec.get("tags") or []))
+    return " ".join(parts)
+
+
+def _compute_idf(corpus: list[list[str]]) -> dict[str, float]:
+    n = len(corpus)
+    if n == 0:
+        return {}
+    df: dict[str, int] = {}
+    for doc in corpus:
+        for term in set(doc):
+            df[term] = df.get(term, 0) + 1
+    return {term: math.log((n + 1) / (freq + 1)) + 1.0 for term, freq in df.items()}
+
+
+def _tfidf_score(query_tokens: list[str], doc_tokens: list[str],
+                 idf: dict[str, float]) -> float:
+    if not query_tokens or not doc_tokens:
+        return 0.0
+    doc_tf = Counter(doc_tokens)
+    doc_len = len(doc_tokens)
+    score = 0.0
+    for qt in set(query_tokens):
+        if qt in doc_tf:
+            tf = doc_tf[qt] / doc_len
+            score += tf * idf.get(qt, 1.0)
+    if score > 0:
+        score /= max(math.sqrt(len(set(query_tokens))), 1.0)
+    return score
+
+
+def _word_overlap(text_a: str, text_b: str) -> float:
+    a = set(_tokenize(text_a))
+    b = set(_tokenize(text_b))
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _find_similar(ns: str, new_id: str, key: str, text: str,
+                  threshold: float = 0.45) -> list[dict]:
+    try:
+        live = _cortex_fold() if _is_cortex_ns(ns) else _mem_fold()
+    except Exception:
+        return []
+    new_text = f"{key} {text}"
+    results = []
+    for rid, rec in live.items():
+        if rid == new_id or rec.get("ns") != ns:
+            continue
+        existing_text = f"{rec.get('key') or ''} {rec.get('text') or ''}"
+        overlap = _word_overlap(new_text, existing_text)
+        if overlap >= threshold:
+            results.append({"id": rid, "key": rec.get("key"), "text": rec.get("text", "")[:120],
+                            "overlap": round(overlap, 2)})
+    results.sort(key=lambda x: x["overlap"], reverse=True)
+    return results[:5]
+
+
+def _is_stale(rec: dict, now: datetime) -> bool:
+    updated = rec.get("updated_at") or rec.get("created_at") or ""
+    if not updated:
+        return False
+    try:
+        age = now - datetime.fromisoformat(updated)
+        return age.days >= STALE_DAYS
+    except ValueError:
+        return False
+
+
 def _ensure_store() -> None:
     os.makedirs(MEMORY_DIR, mode=0o700, exist_ok=True)
     try:
@@ -823,52 +936,275 @@ def _mem_compact(live: dict[str, dict]) -> None:
     log.info("memory compacted -> %d entri hidup", len(live))
 
 
-def _build_memory_digest() -> str:
-    """Ringkasan padat untuk disuntik ke FastMCP(instructions=...) saat startup,
-    sehingga memory otomatis termuat di konteks tiap sesi baru."""
+# ---------------------------------------------------------------------------
+# CORTEX: global memory lintas-project (consciousness layer).
+# Menyimpan profil operator, fakta cross-project, dan event journal.
+# Terpisah dari per-project memory — selalu di-inject ke semua sesi.
+# ---------------------------------------------------------------------------
+_cortex_fold_cache: dict[str, dict] | None = None
+
+
+def _cortex_fold_invalidate() -> None:
+    global _cortex_fold_cache
+    _cortex_fold_cache = None
+
+
+def _cortex_ensure_store() -> None:
+    os.makedirs(GLOBAL_MEMORY_DIR, mode=0o700, exist_ok=True)
+    if not os.path.exists(GLOBAL_MEMORY_FILE):
+        fd = os.open(GLOBAL_MEMORY_FILE, os.O_CREAT | os.O_WRONLY, 0o600)
+        os.close(fd)
+
+
+def _cortex_append(record: dict) -> None:
+    _cortex_ensure_store()
+    _cortex_fold_invalidate()
+    line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+    fd = os.open(GLOBAL_MEMORY_FILE, os.O_WRONLY | os.O_APPEND)
     try:
-        live = list(_mem_fold().values())
-    except Exception as e:  # jangan biarkan memory rusak menjatuhkan server
-        log.warning("gagal baca memory utk digest: %s", e)
-        return ""
-    if not live:
-        return ""
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        os.write(fd, line.encode("utf-8"))
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _cortex_fold() -> dict[str, dict]:
+    global _cortex_fold_cache
+    if _cortex_fold_cache is not None:
+        return _cortex_fold_cache
+    if not os.path.exists(GLOBAL_MEMORY_FILE):
+        _cortex_fold_cache = {}
+        return _cortex_fold_cache
+    state: dict[str, dict] = {}
+    try:
+        with open(GLOBAL_MEMORY_FILE, "r", encoding="utf-8") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+            try:
+                for raw in f:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        rec = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    rid = rec.get("id")
+                    if rid:
+                        state[rid] = rec
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    now = datetime.now(timezone.utc)
+    _cortex_fold_cache = {rid: r for rid, r in state.items()
+                          if not r.get("deleted") and not _is_expired(r, now)}
+    return _cortex_fold_cache
+
+
+def _cortex_compact(live: dict[str, dict]) -> None:
+    _cortex_ensure_store()
+    _cortex_fold_invalidate()
+    tmp = GLOBAL_MEMORY_FILE + ".tmp"
+    fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    try:
+        for rec in live.values():
+            os.write(fd, (json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+    os.replace(tmp, GLOBAL_MEMORY_FILE)
+    log.info("cortex compacted -> %d entri hidup", len(live))
+
+
+def _is_cortex_ns(ns: str) -> bool:
+    return ns in CORTEX_NAMESPACES
+
+
+# ---------------------------------------------------------------------------
+# EVENT JOURNAL: log otomatis aktivitas lintas-project.
+# Append-only, time-series, auto-pruned by age saat baca.
+# ---------------------------------------------------------------------------
+def _event_append(project: str, event: str, detail: str,
+                  severity: str = "info") -> None:
+    if not project:
+        return
+    _cortex_ensure_store()
+    record = {
+        "ts": _now_iso(), "project": project,
+        "event": event, "detail": detail[:500],
+        "severity": severity,
+    }
+    line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+    fd = os.open(GLOBAL_EVENTS_FILE, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        os.write(fd, line.encode("utf-8"))
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _events_read(hours: int = 24, exclude_project: str = "",
+                 project_filter: str = "") -> list[dict]:
+    if not os.path.exists(GLOBAL_EVENTS_FILE):
+        return []
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(1, hours))).isoformat()
+    events: list[dict] = []
+    try:
+        with open(GLOBAL_EVENTS_FILE, "r", encoding="utf-8") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    rec = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("ts", "") < cutoff:
+                    continue
+                if exclude_project and rec.get("project") == exclude_project:
+                    continue
+                if project_filter and rec.get("project") != project_filter:
+                    continue
+                events.append(rec)
+    except OSError:
+        pass
+    return events[-200:]
+
+
+def _build_memory_digest() -> str:
+    """Cortex (global) + project memory + cross-project events, budget-aware."""
+    now = datetime.now(timezone.utc)
 
     def fmt(rec: dict) -> str:
         key = rec.get("key")
         tags = rec.get("tags") or []
         tagstr = f"  [{', '.join(tags)}]" if tags else ""
         head = f"{key}: " if key else "- "
-        return f"- {head}{rec.get('text', '')}{tagstr}"
+        stale = " [STALE?]" if _is_stale(rec, now) else ""
+        return f"- {head}{rec.get('text', '')}{tagstr}{stale}"
 
-    by_ns = {ns: [] for ns in MEMORY_NAMESPACES}
-    for r in live:
-        ns = r.get("ns")
-        if ns in by_ns:
-            by_ns[ns].append(r)
+    def _sort_key(r: dict):
+        return (0 if r.get("pinned") else 1,
+                r.get("updated_at") or r.get("created_at") or "")
 
-    blocks: list[str] = []
-    titles = {
-        "profile": "PROFIL USER",
-        "instruction": "INSTRUKSI DURABLE DARI USER (patuhi)",
-        "server": "FAKTA SERVER (yang di-pin)",
-    }
-    for ns in ("profile", "instruction", "server"):
-        items = by_ns[ns]
-        if ns == "server":
-            items = [r for r in items if r.get("pinned")]  # server: hanya yang di-pin
-        if not items:
-            continue
-        items = sorted(items, key=lambda r: (0 if r.get("pinned") else 1, r.get("created_at", "")))
-        lines = "\n".join(fmt(r) for r in items)
-        blocks.append(f"### {titles[ns]}\n{lines}")
+    try:
+        cortex_live = list(_cortex_fold().values())
+    except Exception:
+        cortex_live = []
+    try:
+        project_live = list(_mem_fold().values())
+    except Exception:
+        project_live = []
+    try:
+        events = _events_read(hours=EVENTS_DIGEST_HOURS, exclude_project=PROJECT_NAME)
+    except Exception:
+        events = []
 
-    if not blocks:
+    if not cortex_live and not project_live and not events:
         return ""
-    body = "\n\n".join(blocks)
-    return ("## MEMORY ODIN (otomatis dari simpanan; perbarui via memory_write/forget)\n"
-            f"{body}\n\n"
-            "Pakai memory_recall untuk detail lebih, memory_write untuk menyimpan fakta/arahan baru.")
+
+    cortex_by_ns: dict[str, list] = {ns: [] for ns in CORTEX_NAMESPACES}
+    for r in cortex_live:
+        ns = r.get("ns")
+        if ns in cortex_by_ns:
+            cortex_by_ns[ns].append(r)
+
+    project_by_ns: dict[str, list] = {ns: [] for ns in PROJECT_NAMESPACES}
+    for r in project_live:
+        ns = r.get("ns")
+        if ns in project_by_ns:
+            project_by_ns[ns].append(r)
+        elif ns == "profile":
+            cortex_by_ns.setdefault("profile", []).append(r)
+
+    footer = "\nPakai memory_recall untuk detail, memory_write untuk simpan, cortex_log untuk catat event."
+    budget = max(500, DIGEST_BUDGET) - len(footer)
+    sections: list[str] = []
+    used = 0
+    truncated = 0
+
+    def _add_section(header_text: str, items: list, pin_only: bool = False):
+        nonlocal used, truncated
+        if pin_only:
+            items = [r for r in items if r.get("pinned")]
+        if not items:
+            return
+        items = sorted(items, key=_sort_key, reverse=True)
+        lines: list[str] = []
+        for r in items:
+            line = fmt(r)
+            if used + len(header_text) + len(line) + 2 > budget:
+                truncated += 1
+                continue
+            lines.append(line)
+            used += len(line) + 1
+        if lines:
+            used += len(header_text)
+            sections.append(header_text + "\n".join(lines))
+
+    cortex_header = "## ODIN CORTEX (global — berlaku di semua project)\n"
+    if cortex_live or events:
+        used += len(cortex_header)
+
+    _add_section("### PROFIL OPERATOR\n",
+                 cortex_by_ns.get("profile", []))
+    _add_section("### CROSS-PROJECT\n",
+                 cortex_by_ns.get("cross", []))
+
+    if events:
+        ev_header = f"### AKTIVITAS PROJECT LAIN ({EVENTS_DIGEST_HOURS}j terakhir)\n"
+        ev_lines: list[str] = []
+        for ev in events[-15:]:
+            sev = ""
+            if ev.get("severity") == "warn":
+                sev = " ⚠"
+            elif ev.get("severity") == "error":
+                sev = " ✗"
+            ts_short = ev.get("ts", "")[:16].replace("T", " ")
+            line = f"- [{ev.get('project','')}] {ts_short} — {ev.get('event','')}: {ev.get('detail','')[:80]}{sev}"
+            if used + len(ev_header) + len(line) + 2 > budget:
+                truncated += 1
+                continue
+            ev_lines.append(line)
+            used += len(line) + 1
+        if ev_lines:
+            used += len(ev_header)
+            sections.append(ev_header + "\n".join(ev_lines))
+
+    prj_label = f": {PROJECT_NAME}" if PROJECT_NAME else ""
+    project_header = f"\n## MEMORY PROJECT{prj_label}\n"
+    if project_live:
+        used += len(project_header)
+
+    instructions = project_by_ns.get("instruction", [])
+    goal = [r for r in instructions if r.get("key") == "project-goal"]
+    non_goal = [r for r in instructions if r.get("key") != "project-goal"]
+    if goal:
+        goal_text = goal[0].get("text", "")
+        goal_line = f"### TUJUAN PROJECT\n{goal_text}\n"
+        if used + len(goal_line) <= budget:
+            sections.append(goal_line)
+            used += len(goal_line)
+
+    _add_section("### INSTRUKSI DURABLE (patuhi)\n", non_goal)
+    _add_section("### FAKTA SERVER (pinned)\n",
+                 project_by_ns.get("server", []), pin_only=True)
+
+    if not sections:
+        return ""
+
+    parts: list[str] = []
+    _prj_prefixes = ("### INSTRUKSI", "### FAKTA", "### TUJUAN")
+    cortex_sections = [s for s in sections if not any(s.startswith(p) for p in _prj_prefixes)]
+    project_sections = [s for s in sections if any(s.startswith(p) for p in _prj_prefixes)]
+    if cortex_sections:
+        parts.append(cortex_header + "\n\n".join(cortex_sections))
+    if project_sections:
+        parts.append(project_header + "\n\n".join(project_sections))
+    body = "\n".join(parts)
+    trunc_note = f"\n\n_({truncated} entry lagi tidak ditampilkan — pakai memory_recall.)_" if truncated else ""
+    return f"{body}{trunc_note}{footer}"
 
 
 def _validate_ns(ns: str) -> str | None:
@@ -1522,6 +1858,8 @@ def service_action(service: str, action: str = "status") -> dict:
     _audit("service_action", f"{action} {service}", result)
     _session_log("service_action", f"{action} {service}", result,
                  pre_state=pre or None, rollback=rb or None)
+    if action in ("restart", "stop", "start", "reload") and result.get("success"):
+        _event_append(PROJECT_NAME, f"service_{action}", service)
     return result
 
 
@@ -1742,6 +2080,8 @@ def laravel_deploy(app_path: str, branch: str = "main", composer: bool = True,
         result["_deploy_defaults_used"] = defaults
     _audit("laravel_deploy", f"{branch} -> {app_path} failed={failed}", result)
     _session_log("laravel_deploy", f"deploy {branch} -> {app_path}", result)
+    sev = "error" if failed else "info"
+    _event_append(PROJECT_NAME, "deploy", f"branch={branch} path={app_path} failed={failed}", sev)
     return result
 
 
@@ -1808,6 +2148,7 @@ def server_info() -> dict:
     r = _run(cmd, None, 60)
     r["agent_mode"] = MODE
     r["ssh_target"] = SSH_TARGET if MODE == "ssh" else None
+    r["project_name"] = PROJECT_NAME
     _session_log("server_info", "ringkasan server", r)
     return r
 
@@ -2076,22 +2417,19 @@ def runbook_templates(name: str = "") -> dict:
 def memory_write(ns: str, text: str, key: str = "", tags: list[str] | None = None,
                  pinned: bool = False, expires_in_days: int = 0,
                  allow_secret: bool = False) -> dict:
-    """Simpan SATU fakta/arahan ke memory persisten agent. Upsert: jika (ns,key) sudah ada,
-    nilainya ditimpa. Memory bertahan lintas sesi & otomatis muncul di konteks sesi baru.
-
-    Pedomani: simpan KESIMPULAN/ATURAN yang padat, BUKAN transkrip percakapan.
+    """Simpan SATU fakta/arahan ke memory persisten. Routing otomatis:
+    - ns "profile"/"cross" → cortex (global, lintas-project)
+    - ns "server"/"instruction" → project memory (isolated per project)
 
     Args:
-        ns: namespace -> "server" (fakta infrastruktur), "instruction" (arahan durable user),
-            "profile" (identitas user). Hanya 3 ini yang diterima.
+        ns: "server" (fakta infra), "instruction" (arahan project), "profile" (identitas
+            operator — global), "cross" (fakta lintas-project — global).
         text: isi memory, ringkas dan mandiri (<= MEMORY_MAX_TEXT karakter).
         key: kunci stabil untuk upsert, mis. "fpm_service". Kosong = entry baru tiap kali.
         tags: label opsional untuk pencarian, mis. ["deploy","mysql"].
         pinned: True -> ikut ringkasan auto-load tiap sesi (untuk fakta penting).
-                Catatan: profile & instruction selalu ikut auto-load; pin terutama untuk ns=server.
-        expires_in_days: >0 -> fakta sementara yang otomatis kedaluwarsa (mis. jadwal malam ini).
-        allow_secret: True hanya jika sengaja menyimpan nilai yang terlihat seperti rahasia
-                      (default: nilai mirip password/token/kunci DITOLAK).
+        expires_in_days: >0 -> fakta sementara yang otomatis kedaluwarsa.
+        allow_secret: True hanya jika sengaja menyimpan nilai mirip rahasia.
     """
     err = _validate_ns(ns)
     if err:
@@ -2108,6 +2446,11 @@ def memory_write(ns: str, text: str, key: str = "", tags: list[str] | None = Non
                          "ini memang bukan rahasia (mis. menjelaskan NAMA env var, bukan nilainya)."}
     tags = [str(t).strip() for t in (tags or []) if str(t).strip()][:12]
 
+    cortex = _is_cortex_ns(ns)
+    append_fn = _cortex_append if cortex else _mem_append
+    fold_fn = _cortex_fold if cortex else _mem_fold
+    compact_fn = _cortex_compact if cortex else _mem_compact
+
     rid = f"{ns}:{_slug(key)}" if key else f"{ns}:{_slug(text[:20])}-{secrets.token_hex(3)}"
     now = _now_iso()
     expires_at = None
@@ -2117,25 +2460,36 @@ def memory_write(ns: str, text: str, key: str = "", tags: list[str] | None = Non
 
     record = {"id": rid, "ns": ns, "key": key or None, "text": text,
               "tags": tags, "source": "session", "created_at": now,
+              "updated_at": now,
               "expires_at": expires_at, "pinned": bool(pinned), "deleted": False}
+
+    similar = _find_similar(ns, rid, key or "", text)
     try:
-        _mem_append(record)
-        # compaction lembut bila log membengkak
-        live = _mem_fold()
+        append_fn(record)
+        live = fold_fn()
         if len(live) > MEMORY_MAX_ENTRIES:
-            _mem_compact(live)
+            compact_fn(live)
     except Exception as e:
         return {"success": False, "error": f"gagal tulis memory: {e}"}
-    return {"success": True, "id": rid, "entry": record}
+    scope = "cortex (global)" if cortex else f"project ({PROJECT_NAME or 'local'})"
+    result: dict = {"success": True, "id": rid, "scope": scope, "entry": record}
+    if similar:
+        result["_similar_existing"] = similar
+        result["_hint"] = ("Ada entry mirip di namespace yang sama. "
+                           "Pertimbangkan memory_forget pada yang sudah tidak relevan.")
+    return result
 
 
 @mcp.tool()
 def memory_recall(ns: str = "", query: str = "", tag: str = "", limit: int = 50) -> dict:
-    """Ambil/cari memory persisten. Tanpa argumen -> semua entry hidup (pinned dulu, terbaru dulu).
+    """Ambil/cari memory persisten dengan semantic search (TF-IDF).
+    Tanpa query -> semua entry hidup (pinned dulu, terbaru dulu).
+    Dengan query -> ranking berdasarkan relevansi semantik + substring match.
 
     Args:
-        ns: batasi ke namespace ("server"|"instruction"|"profile"). Kosong = semua.
-        query: filter substring case-insensitive pada text/key.
+        ns: batasi ke namespace ("server"|"instruction"|"profile"|"cross"). Kosong = semua
+            (cortex + project). Pencarian otomatis mencakup cortex dan project memory.
+        query: pencarian semantik — keyword atau kalimat natural, mis. "cara deploy" atau "versi php".
         tag: filter berdasarkan satu tag.
         limit: maksimum entry dikembalikan.
     """
@@ -2144,25 +2498,60 @@ def memory_recall(ns: str = "", query: str = "", tag: str = "", limit: int = 50)
         if err:
             return {"success": False, "error": err}
     try:
-        items = list(_mem_fold().values())
+        if not ns:
+            items = list(_cortex_fold().values()) + list(_mem_fold().values())
+        elif _is_cortex_ns(ns):
+            items = list(_cortex_fold().values())
+            items += [r for r in _mem_fold().values() if r.get("ns") == ns]
+        else:
+            items = list(_mem_fold().values())
     except Exception as e:
         return {"success": False, "error": f"gagal baca memory: {e}"}
-    q = query.strip().lower()
+
     t = tag.strip().lower()
-    out = []
+    candidates = []
     for r in items:
         if ns and r.get("ns") != ns:
             continue
-        if q and q not in (r.get("text", "") + " " + (r.get("key") or "")).lower():
-            continue
         if t and t not in [str(x).lower() for x in (r.get("tags") or [])]:
             continue
-        out.append(r)
-    # urutan: pinned dulu, lalu terbaru dulu. sort stabil -> dua tahap.
-    out.sort(key=lambda r: r.get("created_at", ""), reverse=True)
-    out.sort(key=lambda r: 0 if r.get("pinned") else 1)
+        candidates.append(r)
+
+    q = query.strip()
+    if q:
+        q_lower = q.lower()
+        q_tokens = _tokenize(q)
+        doc_tokens_map = {}
+        corpus = []
+        for r in candidates:
+            tokens = _tokenize(_entry_text(r))
+            doc_tokens_map[id(r)] = tokens
+            corpus.append(tokens)
+        if q_tokens:
+            corpus.append(q_tokens)
+        idf = _compute_idf(corpus)
+
+        scored = []
+        for r in candidates:
+            tfidf = _tfidf_score(q_tokens, doc_tokens_map[id(r)], idf)
+            full_text = (r.get("text", "") + " " + (r.get("key") or "")).lower()
+            substr_hit = q_lower in full_text
+            if substr_hit:
+                tfidf = max(tfidf, 0.01)
+            if tfidf > 0:
+                scored.append((tfidf, r))
+        scored.sort(key=lambda x: (-x[0], 0 if x[1].get("pinned") else 1))
+        out = [r for _, r in scored]
+    else:
+        out = candidates
+        out.sort(key=lambda r: r.get("updated_at") or r.get("created_at") or "", reverse=True)
+        out.sort(key=lambda r: 0 if r.get("pinned") else 1)
+
     out = out[:max(1, min(int(limit), 500))]
-    return {"success": True, "count": len(out), "entries": out}
+    result: dict = {"success": True, "count": len(out), "entries": out}
+    if q:
+        result["_search_mode"] = "semantic (TF-IDF)"
+    return result
 
 
 @mcp.tool()
@@ -2183,10 +2572,18 @@ def memory_forget(id: str = "", ns: str = "", key: str = "") -> dict:
             rid = f"{ns}:{_slug(key)}"
         else:
             return {"success": False, "error": "Sebutkan `id`, atau pasangan `ns` + `key`."}
+    detect_ns = ns or (rid.split(":")[0] if ":" in rid else "")
+    cortex = _is_cortex_ns(detect_ns)
+    fold_fn = _cortex_fold if cortex else _mem_fold
+    append_fn = _cortex_append if cortex else _mem_append
     try:
-        live = _mem_fold()
+        live = fold_fn()
         existed = rid in live
-        _mem_append({"id": rid, "deleted": True, "created_at": _now_iso()})
+        if not existed and not cortex:
+            existed = rid in _cortex_fold()
+            if existed:
+                append_fn = _cortex_append
+        append_fn({"id": rid, "deleted": True, "created_at": _now_iso()})
     except Exception as e:
         return {"success": False, "error": f"gagal hapus memory: {e}"}
     return {"success": True, "id": rid, "existed": existed}
@@ -2197,10 +2594,148 @@ def memory_digest() -> dict:
     """Kembalikan ringkasan memory yang sama dengan yang disuntik ke konteks saat startup
     (profil user + instruksi durable + fakta server ter-pin). Berguna untuk menyegarkan
     ingatan di tengah sesi tanpa membaca seluruh entry."""
-    active = _mem_fold()
+    cortex_active = _cortex_fold()
+    project_active = _mem_fold()
     return {"success": True, "digest": _build_memory_digest(),
-            "total_active": len(active),
-            "namespaces": list(MEMORY_NAMESPACES), "file": MEMORY_FILE}
+            "cortex_active": len(cortex_active),
+            "project_active": len(project_active),
+            "total_active": len(cortex_active) + len(project_active),
+            "namespaces": list(MEMORY_NAMESPACES),
+            "cortex_file": GLOBAL_MEMORY_FILE,
+            "project_file": MEMORY_FILE}
+
+
+@mcp.tool()
+def memory_health() -> dict:
+    """Diagnostik kesehatan memory (cortex + project): jumlah per namespace, entry basi,
+    potensi duplikat, event count, dan ukuran file."""
+    try:
+        cortex_live = _cortex_fold()
+        project_live = _mem_fold()
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+    now = datetime.now(timezone.utc)
+    by_ns: dict[str, int] = {ns: 0 for ns in MEMORY_NAMESPACES}
+    stale_entries: list[dict] = []
+    all_items = list(cortex_live.values()) + list(project_live.values())
+
+    for r in all_items:
+        ns = r.get("ns")
+        if ns in by_ns:
+            by_ns[ns] += 1
+        if _is_stale(r, now):
+            age_days = 0
+            updated = r.get("updated_at") or r.get("created_at") or ""
+            if updated:
+                try:
+                    age_days = (now - datetime.fromisoformat(updated)).days
+                except ValueError:
+                    pass
+            stale_entries.append({
+                "id": r.get("id"), "key": r.get("key"),
+                "text": (r.get("text") or "")[:80],
+                "age_days": age_days,
+            })
+
+    duplicates: list[dict] = []
+    seen_pairs: set[tuple] = set()
+    for i, a in enumerate(all_items):
+        for b in all_items[i + 1:]:
+            if a.get("ns") != b.get("ns") or a.get("id") == b.get("id"):
+                continue
+            pair = tuple(sorted((a["id"], b["id"])))
+            if pair in seen_pairs:
+                continue
+            text_a = f"{a.get('key') or ''} {a.get('text') or ''}"
+            text_b = f"{b.get('key') or ''} {b.get('text') or ''}"
+            overlap = _word_overlap(text_a, text_b)
+            if overlap >= 0.4:
+                seen_pairs.add(pair)
+                duplicates.append({
+                    "entry_a": {"id": a.get("id"), "text": (a.get("text") or "")[:60]},
+                    "entry_b": {"id": b.get("id"), "text": (b.get("text") or "")[:60]},
+                    "overlap": round(overlap, 2),
+                })
+    duplicates.sort(key=lambda x: x["overlap"], reverse=True)
+
+    project_size = 0
+    cortex_size = 0
+    events_count = 0
+    try:
+        project_size = os.path.getsize(MEMORY_FILE)
+    except OSError:
+        pass
+    try:
+        cortex_size = os.path.getsize(GLOBAL_MEMORY_FILE)
+    except OSError:
+        pass
+    try:
+        events_count = len(_events_read(hours=EVENTS_DIGEST_HOURS))
+    except Exception:
+        pass
+
+    return {
+        "success": True,
+        "cortex_active": len(cortex_live),
+        "project_active": len(project_live),
+        "total_active": len(all_items),
+        "by_namespace": by_ns,
+        "stale_count": len(stale_entries),
+        "stale_threshold_days": STALE_DAYS,
+        "stale_entries": stale_entries[:20],
+        "potential_duplicates": duplicates[:10],
+        "cortex_file_size": cortex_size,
+        "project_file_size": project_size,
+        "events_last_24h": events_count,
+        "digest_budget": DIGEST_BUDGET,
+    }
+
+
+# ---------------------------------------------------------------------------
+# CORTEX TOOLS: event journal lintas-project
+# ---------------------------------------------------------------------------
+@mcp.tool()
+def cortex_log(event: str, detail: str = "", severity: str = "info") -> dict:
+    """Log event lintas-project ke cortex event journal. Otomatis dipanggil ODIN saat
+    deploy/restart service. Bisa juga dipanggil manual untuk event penting lainnya.
+
+    Args:
+        event: tipe event, mis. "deploy", "config_change", "incident", "maintenance".
+        detail: deskripsi singkat (maks 500 karakter).
+        severity: "info" (default), "warn", atau "error".
+    """
+    if severity not in ("info", "warn", "error"):
+        severity = "info"
+    project = PROJECT_NAME or "unknown"
+    try:
+        _event_append(project, event.strip()[:50], (detail or "").strip(), severity)
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+    return {"success": True, "project": project, "event": event, "severity": severity}
+
+
+@mcp.tool()
+def cortex_events(hours: int = 24, project: str = "", limit: int = 50) -> dict:
+    """Baca event journal lintas-project. Default: 24 jam terakhir dari semua project.
+
+    Args:
+        hours: rentang waktu ke belakang (jam). Default 24.
+        project: filter ke satu project saja. Kosong = semua project.
+        limit: maksimum event dikembalikan.
+    """
+    try:
+        events = _events_read(hours=max(1, hours), project_filter=project.strip())
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+    events = events[-max(1, min(limit, 200)):]
+    return {
+        "success": True,
+        "count": len(events),
+        "hours": hours,
+        "current_project": PROJECT_NAME,
+        "events": events,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2211,7 +2746,8 @@ def memory_resource(ns: str) -> str:
     err = _validate_ns(ns)
     if err:
         return err
-    items = [r for r in _mem_fold().values() if r.get("ns") == ns]
+    store = _cortex_fold() if _is_cortex_ns(ns) else _mem_fold()
+    items = [r for r in store.values() if r.get("ns") == ns]
     items = sorted(items, key=lambda r: (0 if r.get("pinned") else 1, r.get("created_at", "")))
     if not items:
         return f"(memory '{ns}' kosong)"
@@ -2328,8 +2864,8 @@ if __name__ == "__main__":
 
     threading.Thread(target=_watchdog, daemon=True, name="odin-watchdog").start()
 
-    log.info("ODIN v%s START | pid=%d ppid=%d deploy_mode=%s type=%s op_mode=%s target=%s project=%s",
+    log.info("ODIN v%s START | pid=%d ppid=%d deploy_mode=%s type=%s op_mode=%s target=%s project=%s root=%s",
              __version__, os.getpid(), _parent_pid,
              MODE, _PROFILE.get("type", "?"), _CURRENT_MODE,
-             SSH_TARGET or "local", PROJECT_ROOT or "-")
+             SSH_TARGET or "local", PROJECT_NAME or "-", PROJECT_ROOT or "-")
     mcp.run(transport="stdio")

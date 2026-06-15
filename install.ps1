@@ -1,5 +1,5 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# ODIN Installer — Windows (PowerShell 5.1+)
+# ODIN v2.0 Installer — Windows (PowerShell 5.1+)
 # Usage: irm https://raw.githubusercontent.com/Syamsuddin/ODIN/main/install.ps1 | iex
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 $ErrorActionPreference = "Stop"
@@ -50,11 +50,18 @@ function Test-Prereqs {
     Write-Info "Memeriksa prasyarat..."
     if (-not (Test-Command "git")) { Write-Fatal "'git' tidak ditemukan. Install Git dari https://git-scm.com" }
     $script:Python = Test-Python
-    if (-not (Test-Command "ssh")) { Write-Warn "'ssh' tidak ditemukan — koneksi ke server memerlukan OpenSSH" }
+
+    if (Test-Command "claude") {
+        Write-Ok "Claude Code CLI ditemukan"
+    } else {
+        Write-Fatal "Claude Code CLI belum terinstall. Install dulu: https://docs.anthropic.com/en/docs/claude-code/getting-started"
+    }
+
+    if (-not (Test-Command "ssh")) { Write-Warn "'ssh' tidak ditemukan — 'odin server add' memerlukan OpenSSH" }
     Write-Ok "Semua prasyarat terpenuhi"
 }
 
-# ── Install / Update ────────────────────────────────────────────────────────
+# ── Install / Update repo ──────────────────────────────────────────────────
 function Install-Odin {
     if (Test-Path "$InstallDir\.git") {
         Write-Info "Instalasi ODIN sudah ada di $InstallDir — memperbarui..."
@@ -73,20 +80,59 @@ function Install-Odin {
     }
 }
 
-function Install-Venv {
-    $venvDir = "$InstallDir\.venv"
-    $venvPy  = "$venvDir\Scripts\python.exe"
-    $venvPip = "$venvDir\Scripts\pip.exe"
+# ── Install CLI dependencies (paramiko, pyyaml) ───────────────────────────
+function Install-CliDeps {
+    $req = "$InstallDir\requirements-cli.txt"
+    if (-not (Test-Path $req)) { return }
 
-    if ((Test-Path $venvPy) -and (& $venvPy -c "import mcp" 2>$null; $LASTEXITCODE -eq 0)) {
-        Write-Ok "Virtual environment sudah ada & valid"
-        return
+    Write-Info "Menginstall dependensi CLI (paramiko, pyyaml)..."
+    try {
+        & $script:Python -m pip install --quiet -r $req 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Ok "Dependensi CLI terinstall"
+        } else {
+            throw "pip failed"
+        }
+    } catch {
+        Write-Warn "Gagal install dependensi CLI — jalankan manual: pip install paramiko pyyaml"
     }
-    Write-Info "Membuat virtual environment..."
-    & $script:Python -m venv $venvDir
-    & $venvPip install --quiet --upgrade pip
-    & $venvPip install --quiet -r "$InstallDir\requirements.txt"
-    Write-Ok "Dependensi terinstall (mcp[cli])"
+}
+
+# ── Install odin CLI command ──────────────────────────────────────────────
+function Install-CliCommand {
+    $cli = "$InstallDir\client\odin_cli.py"
+    if (-not (Test-Path $cli)) { return }
+
+    # Buat wrapper batch file agar 'odin' bisa dipanggil dari cmd/powershell
+    $wrapper = "$InstallDir\odin.cmd"
+    @"
+@echo off
+"$script:Python" "$cli" %*
+"@ | Set-Content -Path $wrapper -Encoding ASCII
+
+    # Buat wrapper PowerShell
+    $psWrapper = "$InstallDir\odin.ps1"
+    @"
+& "$script:Python" "$cli" @args
+"@ | Set-Content -Path $psWrapper -Encoding UTF8
+
+    # Tambah ke PATH via user environment jika belum ada
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if ($userPath -notlike "*$InstallDir*") {
+        [Environment]::SetEnvironmentVariable("Path", "$userPath;$InstallDir", "User")
+        Write-Ok "Ditambahkan ke PATH user: $InstallDir"
+        Write-Info "Restart terminal agar 'odin' tersedia di PATH"
+    } else {
+        Write-Ok "PATH sudah include $InstallDir"
+    }
+    Write-Ok "Perintah 'odin' siap"
+}
+
+# ── Guard hook ────────────────────────────────────────────────────────────
+function Install-GuardHook {
+    $guard = "$InstallDir\client\odin_guard.py"
+    if (-not (Test-Path $guard)) { Write-Fatal "Guard tidak ditemukan di $guard" }
+    Write-Ok "Guard hook siap: $guard"
 }
 
 # ── Updater script ──────────────────────────────────────────────────────────
@@ -108,120 +154,11 @@ if ($local -eq $remote) {
 }
 Write-Host "  ⚠ " -ForegroundColor Yellow -NoNewline; Write-Host "Update tersedia! Memperbarui..."
 git reset --hard origin/main --quiet 2>$null
-if (Test-Path ".venv\Scripts\pip.exe") {
-    & .venv\Scripts\pip.exe install --quiet -r requirements.txt
-}
 $ver = (Select-String -Path "server\odin_agent.py" -Pattern '__version__\s*=\s*"(.+)"' | ForEach-Object { $_.Matches.Groups[1].Value })
 Write-Host "  ✓ " -ForegroundColor Green -NoNewline; Write-Host "ODIN diperbarui ke v$ver"
 '@ | Set-Content -Path $updater -Encoding UTF8
 
-    # Tambah ke PATH via user environment jika belum ada
-    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    if ($userPath -notlike "*$InstallDir*") {
-        [Environment]::SetEnvironmentVariable("Path", "$userPath;$InstallDir", "User")
-        Write-Ok "Ditambahkan ke PATH user: $InstallDir"
-        Write-Info "Restart terminal agar 'odin-update' tersedia di PATH"
-    }
-    Write-Ok "Updater siap: $updater"
-}
-
-# ── Panduan konfigurasi ────────────────────────────────────────────────────
-function Show-ConfigGuide {
-    $guardPath = "$InstallDir\client\odin_guard.py"
-    $ver = (Select-String -Path "$InstallDir\server\odin_agent.py" -Pattern '__version__\s*=\s*"(.+)"' |
-            ForEach-Object { $_.Matches.Groups[1].Value })
-
-    Write-Host ""
-    Write-Host "  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Green
-    Write-Host "    ✓ ODIN v$ver berhasil diinstall!" -ForegroundColor Green
-    Write-Host "  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Green
-
-    Write-Host "`n  📁 Lokasi:" -ForegroundColor White
-    Write-Host "     Instalasi : " -NoNewline; Write-Host $InstallDir -ForegroundColor Cyan
-    Write-Host "     Guard     : " -NoNewline; Write-Host $guardPath -ForegroundColor Cyan
-
-    Write-Host "`n  📋 Langkah selanjutnya:" -ForegroundColor White
-
-    Write-Host "`n  1." -ForegroundColor Yellow -NoNewline
-    Write-Host " Setup server (di VPS):" -ForegroundColor White
-    Write-Host "     scp $InstallDir\server\odin_agent.py  odin@server:/home/odin/"
-    Write-Host "     scp $InstallDir\server\run.sh            odin@server:/home/odin/"
-    Write-Host ""
-    Write-Host "     Di server, buat venv & install dependensi:"
-    Write-Host "       python3 -m venv /home/odin/.venv"
-    Write-Host "       /home/odin/.venv/bin/pip install `"mcp[cli]`""
-
-    Write-Host "`n  2." -ForegroundColor Yellow -NoNewline
-    Write-Host " Konfigurasi MCP (Claude Code):" -ForegroundColor White
-    Write-Host "     Tambahkan ke " -NoNewline; Write-Host "~/.claude.json" -ForegroundColor Cyan -NoNewline; Write-Host ":"
-    Write-Host @"
-
-     {
-       "mcpServers": {
-         "odin": {
-           "type": "stdio",
-           "command": "ssh",
-           "args": ["your-server-alias", "/home/odin/run.sh"]
-         }
-       }
-     }
-"@
-
-    Write-Host "`n  3." -ForegroundColor Yellow -NoNewline
-    Write-Host " Pasang guard hook:" -ForegroundColor White
-    Write-Host "     Tambahkan ke " -NoNewline; Write-Host ".claude/settings.json" -ForegroundColor Cyan -NoNewline; Write-Host " project:"
-    Write-Host @"
-
-     {
-       "permissions": {
-         "allow": [
-           "mcp__odin__server_info",
-           "mcp__odin__tail_log",
-           "mcp__odin__http_health_check",
-           "mcp__odin__memory_recall",
-           "mcp__odin__memory_digest",
-           "mcp__odin__session_history",
-           "mcp__odin__rollback_plan",
-           "mcp__odin__inspect_server"
-         ]
-       },
-       "hooks": {
-         "PreToolUse": [
-           {
-             "matcher": "mcp__odin__(run_command|service_action|laravel_deploy|run_tests|runbook|inspect_server|memory_write|memory_forget)",
-             "hooks": [
-               {
-                 "type": "command",
-                 "command": "python3 '$guardPath'",
-                 "timeout": 10
-               }
-             ]
-           }
-         ],
-         "PostToolUse": [
-           {
-             "matcher": "mcp__odin__inspect_server",
-             "hooks": [
-               {
-                 "type": "command",
-                 "command": "python3 '$guardPath'",
-                 "timeout": 10
-               }
-             ]
-           }
-         ]
-       }
-     }
-"@
-
-    Write-Host "`n  4." -ForegroundColor Yellow -NoNewline
-    Write-Host " Update ODIN:" -ForegroundColor White
-    Write-Host "     Jalankan: " -NoNewline; Write-Host "odin-update" -ForegroundColor Cyan
-    Write-Host "     Atau   : " -NoNewline; Write-Host "powershell $InstallDir\odin-update.ps1" -ForegroundColor Cyan
-
-    Write-Host "`n  📖 Dokumentasi: " -NoNewline; Write-Host "https://github.com/$Repo" -ForegroundColor Cyan
-    Write-Host "  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Green
-    Write-Host ""
+    Write-Ok "Updater siap: odin-update.ps1"
 }
 
 # ── Main ────────────────────────────────────────────────────────────────────
@@ -229,6 +166,58 @@ Show-Banner
 Write-Info "Terdeteksi: Windows $([System.Environment]::OSVersion.Version)"
 Test-Prereqs
 Install-Odin
-Install-Venv
+Install-CliDeps
+Install-CliCommand
+Install-GuardHook
 Install-Updater
-Show-ConfigGuide
+
+$version = (Select-String -Path "$InstallDir\server\odin_agent.py" -Pattern '__version__\s*=\s*"(.+)"' |
+            ForEach-Object { $_.Matches.Groups[1].Value })
+
+Write-Host ""
+Write-Host "  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Green
+Write-Host "    ✓ ODIN v$version terinstall" -ForegroundColor Green
+Write-Host "  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Green
+
+# Cek apakah sudah ada server terdaftar
+$hasServers = (Test-Path "$env:USERPROFILE\.odin\servers\*.yaml") -or (Test-Path "$env:USERPROFILE\.odin\servers\*.json")
+
+if ($hasServers) {
+    Write-Host ""
+    Write-Ok "Server sudah terdaftar."
+    Write-Host ""
+    Write-Host "  Kelola server & project:" -ForegroundColor White
+    Write-Host "    odin server list        " -ForegroundColor Cyan -NoNewline; Write-Host "— daftar server"
+    Write-Host "    odin project list       " -ForegroundColor Cyan -NoNewline; Write-Host "— daftar project"
+    Write-Host "    odin server add         " -ForegroundColor Cyan -NoNewline; Write-Host "— tambah server baru"
+    Write-Host "    odin project add        " -ForegroundColor Cyan -NoNewline; Write-Host "— tambah project baru"
+} else {
+    Write-Host ""
+    Write-Host "  Langkah selanjutnya:" -ForegroundColor White
+    Write-Host ""
+    Write-Host "    1. " -ForegroundColor Yellow -NoNewline
+    Write-Host "Setup server       " -NoNewline; Write-Host "odin server add" -ForegroundColor Cyan
+    Write-Host "    2. " -ForegroundColor Yellow -NoNewline
+    Write-Host "Tambah project     " -NoNewline; Write-Host "odin project add" -ForegroundColor Cyan
+    Write-Host "    3. " -ForegroundColor Yellow -NoNewline
+    Write-Host "Mulai bekerja      " -NoNewline; Write-Host "cd ~\project; claude" -ForegroundColor Cyan
+    Write-Host ""
+
+    $doSetup = Read-Host "  Setup server sekarang? [Y/n]"
+    if ($doSetup -ne "n" -and $doSetup -ne "N") {
+        Write-Host ""
+        $odinCmd = "$InstallDir\client\odin_cli.py"
+        if (Test-Command "odin") {
+            & odin server add
+        } elseif (Test-Path $odinCmd) {
+            & $script:Python $odinCmd server add
+        } else {
+            Write-Warn "CLI odin tidak ditemukan — jalankan manual: python $odinCmd server add"
+        }
+    }
+}
+
+Write-Host ""
+Write-Host "  Update:  " -NoNewline; Write-Host "odin-update" -ForegroundColor Cyan
+Write-Host "  Docs:    " -NoNewline; Write-Host "https://github.com/$Repo" -ForegroundColor Cyan
+Write-Host ""

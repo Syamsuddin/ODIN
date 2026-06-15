@@ -130,6 +130,44 @@ install_guard_hook() {
     ok "Guard hook siap: $guard"
 }
 
+# ── Install CLI dependencies (paramiko, pyyaml) ───────────────────────────
+install_cli_deps() {
+    local req="$INSTALL_DIR/requirements-cli.txt"
+    if [ ! -f "$req" ]; then
+        return
+    fi
+    info "Menginstall dependensi CLI (paramiko, pyyaml)..."
+    if $PYTHON -m pip install --quiet -r "$req" 2>/dev/null; then
+        ok "Dependensi CLI terinstall"
+    elif pip3 install --quiet -r "$req" 2>/dev/null; then
+        ok "Dependensi CLI terinstall"
+    else
+        warn "Gagal install dependensi CLI — 'odin server add' butuh: pip install paramiko pyyaml"
+    fi
+}
+
+# ── Install odin CLI command ──────────────────────────────────────────────
+install_cli_command() {
+    local cli="$INSTALL_DIR/client/odin_cli.py"
+    if [ ! -f "$cli" ]; then
+        return
+    fi
+    chmod +x "$cli"
+    local bin_link="/usr/local/bin/odin"
+    if [ -w "$(dirname "$bin_link")" ] 2>/dev/null; then
+        ln -sf "$cli" "$bin_link" 2>/dev/null && \
+            ok "Perintah 'odin' tersedia di PATH" || true
+    else
+        if command -v sudo >/dev/null 2>&1; then
+            sudo ln -sf "$cli" "$bin_link" 2>/dev/null && \
+                ok "Perintah 'odin' tersedia di PATH" || \
+                warn "Jalankan manual: python3 $cli"
+        else
+            warn "Tidak bisa buat symlink — jalankan manual: python3 $cli"
+        fi
+    fi
+}
+
 # ── Symlink update command ──────────────────────────────────────────────────
 install_updater() {
     local updater="$INSTALL_DIR/odin-update.sh"
@@ -748,39 +786,69 @@ main() {
     info "Terdeteksi: $OS ($(uname -m))"
     check_prereqs
     install_odin
+    install_cli_deps
+    install_cli_command
     install_guard_hook
     install_updater
 
     local version
     version=$(grep -m1 '__version__' "$INSTALL_DIR/server/odin_agent.py" | cut -d'"' -f2)
 
-    # Cek konfigurasi existing
+    printf "\n${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    printf "${BOLD}${GREEN}  ✓ ODIN v${version} terinstall${NC}\n"
+    printf "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n\n"
+
+    # Cek apakah sudah ada server terdaftar (v2.0 style)
+    local has_servers=false
+    if [ -d "$HOME/.odin/servers" ] && ls "$HOME/.odin/servers"/*.yaml >/dev/null 2>&1; then
+        has_servers=true
+    fi
+
+    # Cek apakah ada config legacy v1.x
+    local has_legacy=false
     if detect_existing_config; then
-        printf "\n  ${GREEN}✓${NC} Konfigurasi ODIN sudah ada:\n"
+        has_legacy=true
+    fi
+
+    if [ "$has_servers" = true ]; then
+        printf "  ${GREEN}✓${NC} Server sudah terdaftar.\n\n"
+        printf "  Kelola server & project:\n"
+        printf "    ${CYAN}odin server list${NC}        — daftar server\n"
+        printf "    ${CYAN}odin project list${NC}       — daftar project\n"
+        printf "    ${CYAN}odin server add${NC}         — tambah server baru\n"
+        printf "    ${CYAN}odin project add${NC}        — tambah project baru\n\n"
+    elif [ "$has_legacy" = true ]; then
+        printf "  ${YELLOW}⚠${NC}  Konfigurasi ODIN v1.x terdeteksi:\n"
         printf "      Target : ${CYAN}%s${NC}\n" "$EXISTING_SSH_HOST"
         printf "      Path   : ${CYAN}%s${NC}\n\n" "$EXISTING_RUN_PATH"
-        printf "${BOLD}  Konfigurasi ulang? [y/N]${NC}: "
-        local reconfig
-        read -r reconfig <&"$TTY_FD"
-        if [[ ! "$reconfig" =~ ^[Yy]$ ]]; then
-            printf "\n${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
-            printf "${BOLD}${GREEN}  ✓ ODIN v${version} siap${NC}\n"
-            printf "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n\n"
-            printf "  Update:  ${CYAN}odin-update${NC}\n"
-            printf "  Docs:    ${CYAN}https://github.com/${REPO}${NC}\n\n"
-            return
+        printf "  ODIN v2.0 menggunakan 'odin server add' & 'odin project add'.\n"
+        printf "  Konfigurasi lama tetap berjalan. Migrasi ke v2.0:\n\n"
+        printf "    ${CYAN}odin server add${NC}         — register server baru\n"
+        printf "    ${CYAN}odin project add${NC}        — link workdir ke server\n\n"
+    else
+        printf "  Langkah selanjutnya:\n\n"
+        printf "    ${CYAN}1.${NC} Setup server       ${CYAN}odin server add${NC}\n"
+        printf "    ${CYAN}2.${NC} Tambah project     ${CYAN}odin project add${NC}\n"
+        printf "    ${CYAN}3.${NC} Mulai bekerja      ${CYAN}cd ~/project && claude${NC}\n\n"
+
+        printf "${BOLD}  Setup server sekarang? [Y/n]${NC}: "
+        local do_setup
+        read -r do_setup <&"$TTY_FD"
+        if [[ ! "$do_setup" =~ ^[Nn]$ ]]; then
+            printf "\n"
+            local odin_cmd="$INSTALL_DIR/client/odin_cli.py"
+            if command -v odin >/dev/null 2>&1; then
+                odin server add
+            elif [ -x "$odin_cmd" ]; then
+                "$PYTHON" "$odin_cmd" server add
+            else
+                warn "CLI odin tidak ditemukan — jalankan manual: python3 $odin_cmd server add"
+            fi
         fi
     fi
 
-    FULL_DONE=false
-    setup_full
-    if [ "$FULL_DONE" = true ]; then
-        printf "\n${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
-        printf "${BOLD}${GREEN}  ✓ ODIN v${version} — Setup selesai!${NC}\n"
-        printf "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n\n"
-        printf "  Update:  ${CYAN}odin-update${NC}\n"
-        printf "  Docs:    ${CYAN}https://github.com/${REPO}${NC}\n\n"
-    fi
+    printf "\n  Update:  ${CYAN}odin-update${NC}\n"
+    printf "  Docs:    ${CYAN}https://github.com/${REPO}${NC}\n\n"
 }
 
 main "$@"

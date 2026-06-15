@@ -9,12 +9,14 @@
 
 <p align="center">
   <a href="#"><img src="https://img.shields.io/badge/MCP_Tools-17-00bcd4?style=flat-square&logo=lightning&logoColor=white" alt="17 MCP Tools"/></a>
+  <a href="#"><img src="https://img.shields.io/badge/CLI_Commands-11-4caf50?style=flat-square&logo=terminal&logoColor=white" alt="11 CLI Commands"/></a>
   <a href="#"><img src="https://img.shields.io/badge/Security-4_Layers-e53935?style=flat-square&logo=shield&logoColor=white" alt="4 Security Layers"/></a>
   <a href="#"><img src="https://img.shields.io/badge/Risk_Tiers-5-ff9800?style=flat-square&logo=alert&logoColor=white" alt="5 Risk Tiers"/></a>
+  <a href="#"><img src="https://img.shields.io/badge/Tests-536-9c27b0?style=flat-square&logo=pytest&logoColor=white" alt="536 Tests"/></a>
 </p>
 
 <p align="center">
-  <b>MCP Agent AI untuk server Linux</b> — jembatan dari Claude Code (otak di laptop) ke server live (tangan di VPS).
+  <b>MCP Agent AI untuk server Linux</b> — multi-server, multi-project, workdir-based. Claude Code (otak di laptop) ke server live (tangan di VPS).
 </p>
 
 <p align="center">
@@ -30,35 +32,47 @@
 |-------------|-------------|
 | SSH manual, ketik command satu per satu | Instruksi natural language, eksekusi otomatis |
 | Lupa urutan deploy, skip langkah | Workflow konsisten via runbook engine |
-| Error tak terdeteksi sampai user komplain | 22 pola error dianalisis real-time + saran perbaikan |
+| Error tak terdeteksi sampai user komplain | 23 pola error dianalisis real-time + saran perbaikan |
 | Rollback panik: "commit sebelumnya apa?" | State dicatat otomatis sebelum operasi destruktif |
 | Setiap sesi mulai dari nol | Memory persisten: ODIN ingat server, preferensi, instruksi |
 | Risk fatigue: approve semua tanpa baca | Kartu risiko 5 tier: baca sekilas, putuskan cepat |
 | Server state tak diketahui | Auto-inspect: type, stack, mode terdeteksi otomatis |
+| Satu server, satu project per session | Multi-server, multi-project — switch = pindah folder |
+| Tidak tahu sedang kerja di project mana | Project identity tampil di SETIAP risk card + `/odin:status` |
 
 ---
 
 ## Arsitektur
 
 ```
-LAPTOP (Claude Code CLI)                    SERVER (Ubuntu VPS, user: odin)
-┌─────────────────────────┐  SSH stdio MCP  ┌────────────────────────────────┐
-│                         │ ──────────────▶ │                                │
-│  odin_guard.py  │  spawn fresh    │  odin_agent.py (ODIN server) │
-│  ├─ READ/WRITE classify │  per sesi       │  ├─ 17 MCP tools               │
-│  ├─ Risk engine (5 tier)│                 │  ├─ Output intelligence (23)   │
-│  ├─ Mode-aware tier     │                 │  ├─ Rollback tracking          │
-│  ├─ Undo hints (12 pat) │                 │  ├─ Runbook engine + templates │
-│  └─ Kartu risiko UI     │                 │  ├─ Server profiler + modes    │
-│                         │                 │  ├─ Memory persisten (JSONL)   │
-│  651 baris Python       │                 │  ├─ Audit log + audit_tail     │
-│                         │                 │  ├─ Deploy fingerprint & drift │
-│                         │                 │  └─ Watchdog (health://live)   │
-│                         │                 │  2046 baris Python             │
-└─────────────────────────┘                 └────────────────────────────────┘
+LAPTOP (Claude Code CLI)                    SERVER(S) (VPS, user: odin)
+┌─────────────────────────┐                 ┌────────────────────────────────┐
+│  odin_cli.py            │  SSH stdio MCP  │  odin_agent.py (shared)        │
+│  ├─ server add/list/rm  │ ──────────────▶ │  run.sh --project <name>       │
+│  ├─ project add/list/rm │  per project    │  projects/<name>.conf          │
+│  ├─ project status      │                 │  memory/<name>/ (isolated)     │
+│  ├─ project switch      │                 │                                │
+│  └─ update / doctor     │                 │  17 MCP tools                  │
+│                         │                 │  Output intelligence (23)      │
+│  odin_guard.py          │                 │  Rollback tracking             │
+│  ├─ READ/WRITE classify │                 │  Runbook engine + templates    │
+│  ├─ Risk engine (5 tier)│                 │  Server profiler + modes       │
+│  ├─ Per-project mode    │                 │  Audit log + watchdog          │
+│  ├─ Project identity UI │                 │                                │
+│  └─ Kartu risiko + warn │                 │  2335 baris Python             │
+│                         │                 └────────────────────────────────┘
+│  ~/.odin/               │
+│  ├─ servers/ keys/      │
+│  ├─ projects/ modes/    │
+│                         │
+│  <workdir>/.claude/     │  ← MCP config per project (workdir-based switching)
+│    settings.json        │
+│                         │
+│  ~2400 baris Python     │
+└─────────────────────────┘
 ```
 
-**Koneksi**: SSH stdio — tidak perlu port tambahan, tidak perlu daemon, tidak perlu API key di server. MCP server di-spawn fresh tiap sesi Claude Code, lalu mati otomatis saat sesi berakhir.
+**Koneksi**: SSH stdio — tidak perlu port tambahan, tidak perlu daemon, tidak perlu API key di server. MCP server di-spawn fresh tiap sesi Claude Code per project, lalu mati otomatis saat sesi berakhir.
 
 ---
 
@@ -67,35 +81,32 @@ LAPTOP (Claude Code CLI)                    SERVER (Ubuntu VPS, user: odin)
 ```
 ODIN/
 ├── server/
-│   ├── odin_agent.py    # MCP server ODIN (2046 baris) — jalan di VPS
-│   └── run.sh             # Launcher: set env + exec venv python
+│   ├── odin_agent.py        # MCP server (2335 baris) — jalan di VPS
+│   └── run.sh               # Multi-project launcher: --project <name>
 ├── client/
-│   ├── odin_guard.py  # Risk engine + gerbang read/write (651 baris) — jalan di laptop
-│   └── update_checker.py      # Cek versi terbaru dari GitHub (155 baris)
-├── tests/                     # 485 tests across 10 files
-│   ├── test_core.py           # Core functions (44 tests)
-│   ├── test_guard.py          # Guard classifier & risk engine (160 tests)
-│   ├── test_memory.py         # Memory system (58 tests)
-│   ├── test_output_intelligence.py  # Error patterns (48 tests)
-│   ├── test_fase2_intelligence.py   # Suggestions, tracking, trends (25 tests)
-│   ├── test_fase3.py          # Runbook & rollback (36 tests)
-│   ├── test_fase3_ux.py       # Audit tail, undo hints, templates (32 tests)
-│   ├── test_fase4_proactive.py # Fingerprint, drift, budget, watchdog (38 tests)
-│   └── test_profile_mode.py   # Server profiler & mode (44 tests)
+│   ├── odin_cli.py          # CLI multi-server & multi-project (985 baris)
+│   ├── odin_guard.py        # Risk engine + guard (720 baris) — project-aware
+│   └── update_checker.py    # Cek versi terbaru (155 baris)
+├── tests/                   # 536 tests across 12 files
+│   ├── test_core.py         # (48), test_guard.py (160), test_memory.py (58)
+│   ├── test_output_intelligence.py (48), test_fase2_intelligence.py (25)
+│   ├── test_fase3.py (36), test_fase3_ux.py (32), test_fase4_proactive.py (38)
+│   ├── test_profile_mode.py (44)
+│   ├── test_guard_multiproject.py (24)  # Project awareness tests
+│   └── test_cli.py          # (24) — CLI + run.sh + project tests
 ├── docs/
-│   └── MEMORY_NOTES.md        # Dokumentasi sistem memory
-├── install.sh                 # Installer + server setup wizard (macOS & Linux, 857 baris)
-├── install.ps1                # Installer Windows (PowerShell)
-├── uninstall.sh               # Uninstaller + auto-clean config (macOS & Linux)
-├── uninstall.ps1              # Uninstaller Windows (PowerShell)
-├── requirements.txt           # Dependensi: mcp[cli]
-├── CLAUDE.md                  # Instruksi untuk Claude Code
-├── CHANGELOG.md               # Riwayat perubahan
-├── EXECUTIVE_SUMMARY.md       # Rangkuman eksekutif
-└── REVIEW_EMPAT_FAKTOR.md     # Review teknis 4 dimensi
+│   └── MEMORY_NOTES.md
+├── install.sh               # Installer v2.0 (macOS & Linux)
+├── install.ps1              # Installer v2.0 (Windows PowerShell)
+├── uninstall.sh / .ps1
+├── requirements.txt         # Server: mcp[cli]
+├── requirements-cli.txt     # Laptop CLI: paramiko, pyyaml
+├── CLAUDE.md
+├── CHANGELOG.md
+└── CODING_PLAN_MULTI_PROJECT.md  # Desain multi-project
 ```
 
-**Total**: 2852 baris source + 3545 baris test = **6397 baris**
+**Total**: ~4195 baris source + ~4100 baris test
 
 ---
 
@@ -108,7 +119,7 @@ ODIN/
 | `run_command` | Jalankan command shell apa pun di server | READ: otomatis, WRITE: kartu risiko |
 | `tail_log` | Baca N baris terakhir file log (Laravel, Nginx, system) | Otomatis |
 | `service_action` | Kelola systemd: status, restart, reload, start, stop | READ: otomatis, WRITE: kartu risiko |
-| `server_info` | Ringkasan server: OS, disk, memory, PHP, uptime | Otomatis |
+| `server_info` | Ringkasan server: OS, disk, memory, PHP, uptime, **project_name** | Otomatis |
 | `inspect_server` | Full inspection: type detection, stack scan, mode derivation | Otomatis |
 
 ### Deploy & Testing
@@ -147,6 +158,78 @@ ODIN/
 
 ---
 
+## Multi-Project — Workdir-Based Switching
+
+### Konsep Inti
+
+**1 project = 1 workdir lokal + 1 server remote + memory terisolasi + mode sendiri.**
+
+Switch project = pindah folder, buka Claude Code baru. Tidak ada perintah switch manual di dalam sesi Claude Code (1 sesi = 1 MCP connection = 1 project).
+
+### Project Awareness (v2.0)
+
+ODIN sekarang **tahu dan tampilkan** project aktif di mana-mana:
+
+1. **Risk cards** — setiap kartu risiko menampilkan identitas project sebagai **baris PERTAMA**:
+   ```
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   Prj   : simuru → vps-app
+   🟡 RISIKO: SEDANG
+   Cmd   : systemctl restart nginx
+   ...
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   ```
+
+2. **`/odin:status`** — skill menampilkan project sebagai baris pertama:
+   ```
+   Project   : simuru → vps-app (production)
+   Server    : Ubuntu 22.04, uptime 45d, disk 62%
+   Memory    : 12 entries (3 instruksi)
+   ```
+
+3. **Guard warnings** — jika project tidak terdaftar di `~/.odin/projects/`, kartu risiko menampilkan warning:
+   ```
+   ⚠ Project 'simuru' tidak terdaftar di ~/.odin/projects/
+   ```
+
+4. **CLI validation** — `odin project status` memvalidasi config lokal + SSH ping server
+
+5. **CLI switch helper** — `odin project switch <name>` membuka tab Terminal baru di workdir project (macOS: via `osascript`, fallback: print `cd` command)
+
+### CLI Commands
+
+| Command | Fungsi |
+|---------|--------|
+| `odin server add` | Setup server baru (interaktif: hostname, port, user, password) |
+| `odin server list` | Daftar server terdaftar |
+| `odin server remove <alias>` | Hapus server |
+| `odin server test <alias>` | Test koneksi + ODIN health |
+| `odin project add` | Link workdir lokal ↔ server:project |
+| `odin project list` | Daftar project terdaftar (dengan marker `→` untuk project aktif) |
+| `odin project status [name]` | **Baru** — Validasi project: config lokal + SSH ping server |
+| `odin project switch <name>` | **Baru** — Buka tab Terminal baru di workdir project |
+| `odin project remove <name>` | Hapus project config |
+| `odin update <alias>` | Update odin_agent.py + run.sh di server |
+| `odin doctor <alias>` | Diagnostik server lengkap |
+
+### Alur Kerja
+
+1. `odin server add` — setup server (1x per server)
+2. `odin project add` — link workdir ↔ server:project (1x per project)
+3. `cd ~/project && claude` — ODIN otomatis aktif ke server & project yang benar
+4. `/odin:status` — cek project identity + server state
+5. Risk card setiap WRITE operation menampilkan `Prj : <name> → <server>`
+
+### Isolasi Per Project
+
+- **Memory**: `memory/<project>/` di server (terpisah)
+- **Audit log**: per project
+- **Mode operasi**: `~/.odin/modes/<project>` di laptop
+- **MCP config**: `<workdir>/.claude/settings.json` (auto-generated)
+- **Project identity**: di-export via `PROJECT_NAME` env var dari `.conf` ke agent
+
+---
+
 ## Model Keamanan — 4 Lapis Defense-in-Depth
 
 ```
@@ -157,6 +240,7 @@ Lapis 1: READ/WRITE Classifier (client — odin_guard.py)
 Lapis 2: Risk Engine + Kartu Risiko (client)
          5 tier: AMAN → RENDAH → SEDANG → TINGGI → KRITIS
          26 aturan shell + DB risk assessor
+         Project identity tampil di SETIAP kartu (Prj : <name> → <server>)
          User membaca kartu, memutuskan approve/reject
               ↓
 Lapis 3: Hard-block Katastrofik (server — _DANGER_RE)
@@ -168,10 +252,11 @@ Lapis 4: OS-level (server)
          Batas keamanan sesungguhnya
 ```
 
-### Contoh Kartu Risiko
+### Contoh Kartu Risiko (v2.0)
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Prj   : simuru → vps-app
 🟠 RISIKO: TINGGI
 Cmd   : git reset --hard origin/main
 Dir   : /var/www/simuru
@@ -181,21 +266,34 @@ Saran : Stash dulu jika ada kerja penting
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
+Dengan warning jika project tidak terdaftar:
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Prj   : simuru → vps-app
+🟡 RISIKO: SEDANG
+Cmd   : rm -rf /tmp/cache
+...
+⚠ Project 'simuru' tidak terdaftar di ~/.odin/projects/
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
 ### Perlindungan Tambahan
 
 - **Command substitution** (`$()` dan backtick) di-detect dan di-force ke "ask" — mencegah bypass via subshell
 - **Secret detection** di memory: password, token, private key, JWT, AWS key ditolak masuk JSONL
 - **Memory di luar webroot**: tidak bisa diakses via web, tidak ikut `git reset --hard` saat deploy
-- **Audit trail**: setiap eksekusi tercatat append-only — untuk forensik pasca-insiden
+- **Audit trail**: setiap eksekusi tercatat append-only dengan `project` field — untuk forensik pasca-insiden
 - **Production mode**: tier risiko naik 1 level + warning `MODE PRODUCTION` di kartu risiko
+- **Project identity everywhere**: setiap risk card, service card, dan `/odin:status` menampilkan project name
 
 ---
 
 ## Kecerdasan Bawaan
 
-### Output Intelligence (22 Pola Error)
+### Output Intelligence (23 Pola Error)
 
-Setiap output command dianalisis terhadap 22 pola error — dari spesifik ke generik:
+Setiap output command dianalisis terhadap 23 pola error — dari spesifik ke generik:
 
 | Kategori | Pola yang Dideteksi |
 |----------|---------------------|
@@ -226,7 +324,7 @@ Claude menyusun langkah berdasarkan konteks — ODIN mengeksekusi berurutan (mak
 
 ### Pre-flight Checks
 
-Sebelum `laravel_deploy`, otomatis cek: disk (blokir jika >= 95%), git dirty files, commit saat ini, versi PHP. Blocker = deploy dibatalkan dengan laporan.
+Sebelum `laravel_deploy`, otomatis cek: disk (blokir jika >= 95%), git dirty files, commit saat ini, versi PHP, **drift detection** (bandingkan state vs deploy fingerprint terakhir). Blocker = deploy dibatalkan dengan laporan.
 
 ### Server Profiler & Mode Operasi
 
@@ -237,9 +335,13 @@ Pada startup, ODIN menjalankan inspeksi penuh:
 4. **App inspection** — .env, vendor, framework detection, git state
 5. **Mode derivation** — otomatis: `setup` / `deploy` / `production`
 
+**Cache startup**: jika `server:stack-profile` memory < 1 jam, skip full inspection — load mode dan type dari cache.
+
 **Mode enforcement** (dual layer):
 - **Server** (`_mode_gate`): production mode memblokir `laravel_deploy` dan package-install commands
 - **Guard** (`_shift_tier`): production mode menaikkan tier risiko +1 level
+
+**Mode per project**: disimpan di `~/.odin/modes/<project>` dan auto-sync via PostToolUse hook saat `inspect_server`.
 
 ### Memory Persisten
 
@@ -248,10 +350,11 @@ Pada startup, ODIN menjalankan inspeksi penuh:
 - Auto-inject ke konteks saat spawn — setiap sesi baru langsung "ingat"
 - Compaction otomatis saat melebihi `MEMORY_MAX_ENTRIES`
 - Storage di luar webroot dan `PROJECT_ROOT` — aman dari deploy & run_command
+- **Isolated per project**: `memory/<project>/` di server
 
 ### Audit Log
 
-Setiap eksekusi tool dicatat ke `audit.jsonl`: timestamp, tool, summary, success, exit_code, durasi, mode. Append-only, tidak pernah dihapus.
+Setiap eksekusi tool dicatat ke `audit.jsonl`: timestamp, tool, summary, success, exit_code, durasi, mode, **project**. Append-only, tidak pernah dihapus. Isolated per project.
 
 ---
 
@@ -259,115 +362,46 @@ Setiap eksekusi tool dicatat ke `audit.jsonl`: timestamp, tool, summary, success
 
 ### Installer Otomatis (Rekomendasi)
 
+**macOS & Linux:**
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Syamsuddin/ODIN/main/install.sh | bash
 ```
 
-Installer terintegrasi menangani **laptop + server** dalam satu langkah:
+**Windows:**
 
-**Tahap 1 — Laptop (otomatis)**
-- Clone repo, buat venv, install `mcp[cli]`, setup guard hook, buat perintah `odin-update`
-- Wizard interaktif: 3 pertanyaan (SSH host, path `run.sh`, scope guard) → config ditulis otomatis ke `~/.claude.json` dan `settings.json`
-- Tes koneksi SSH ke server
+```powershell
+irm https://raw.githubusercontent.com/Syamsuddin/ODIN/main/install.ps1 | iex
+```
 
-**Tahap 2 — Server via SSH (opsional, ditawarkan setelah laptop selesai)**
-- Cek Python 3 dan `python3-venv` di server
-- Buat user `odin` jika belum ada
-- Buat venv + install `mcp[cli]`
-- Upload `odin_agent.py` dan generate `run.sh` dengan config yang benar
-- Set password user `odin`
-- Verifikasi semua file terpasang
+Installer menangani:
 
-SSH ControlMaster digunakan agar hanya satu kali autentikasi selama setup.
+1. Download repo ke `~/.odin/`
+2. Install dependensi CLI (`paramiko`, `pyyaml`)
+3. Setup command `odin` di PATH
+4. Setup guard hook
+5. Tanya: "Setup server sekarang?" → `odin server add`
 
-**Windows**: `irm https://raw.githubusercontent.com/Syamsuddin/ODIN/main/install.ps1 | iex` (laptop only, server setup manual)
-
-### Manual
-
-Jika lebih memilih setup manual (atau installer gagal):
-
-**1. Di Laptop (client)**
+### Setelah Install
 
 ```bash
-git clone https://github.com/Syamsuddin/ODIN.git ~/.odin
-cd ~/.odin
-python3 -m venv .venv && .venv/bin/pip install "mcp[cli]"
-```
+# 1. Setup server (1x per server)
+odin server add
 
-**2. Di Server (VPS)**
+# 2. Tambah project (1x per project)
+odin project add
 
-```bash
-# Buat user odin (sebagai root)
-useradd -m -s /bin/bash odin
-passwd odin
+# 3. Mulai bekerja
+cd ~/PROJECTS/SIMURU && claude
 
-# Setup venv + install dependensi
-python3 -m venv /home/odin/.venv
-/home/odin/.venv/bin/pip install "mcp[cli]"
+# 4. Cek project identity
+/odin:status
 
-# Salin file dari laptop
-scp ~/.odin/server/odin_agent.py  <host>:/home/odin/
-scp ~/.odin/server/run.sh           <host>:/home/odin/
+# 5. Validasi project config
+odin project status
 
-# Set permissions
-chmod 600 /home/odin/odin_agent.py
-chmod 755 /home/odin/run.sh
-chown -R odin:odin /home/odin/
-```
-
-**3. Konfigurasi Claude Code**
-
-MCP server (`~/.claude.json`):
-
-```json
-{
-  "mcpServers": {
-    "odin": {
-      "type": "stdio",
-      "command": "ssh",
-      "args": ["your-server-alias", "/home/odin/run.sh"]
-    }
-  }
-}
-```
-
-Guard hook (`.claude/settings.json`):
-
-```json
-{
-  "permissions": {
-    "allow": [
-      "mcp__odin__server_info",
-      "mcp__odin__tail_log",
-      "mcp__odin__http_health_check",
-      "mcp__odin__memory_recall",
-      "mcp__odin__memory_digest",
-      "mcp__odin__session_history",
-      "mcp__odin__rollback_plan",
-      "mcp__odin__inspect_server"
-    ]
-  },
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "mcp__odin__(run_command|service_action|laravel_deploy|run_tests|runbook|inspect_server|memory_write|memory_forget)",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 '<path-to>/odin_guard.py'",
-            "timeout": 10
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-### Update
-
-```bash
-odin-update
+# 6. Switch ke project lain
+odin project switch <name>
 ```
 
 ### Uninstall
@@ -375,8 +409,6 @@ odin-update
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Syamsuddin/ODIN/main/uninstall.sh | bash
 ```
-
-Uninstaller menghapus direktori ODIN, membersihkan config `mcpServers.odin` dan hook `mcp__odin__` dari `~/.claude.json` dan semua `settings.json` secara otomatis, serta menawarkan cleanup server via SSH.
 
 Windows: `irm https://raw.githubusercontent.com/Syamsuddin/ODIN/main/uninstall.ps1 | iex`
 
@@ -388,12 +420,13 @@ Windows: `irm https://raw.githubusercontent.com/Syamsuddin/ODIN/main/uninstall.p
 User: "Cek kenapa website error 500, perbaiki kalau bisa"
 
 Claude Code (otak):
-  1. server_info          → "Ubuntu 24.04, disk 42%, PHP 8.3"
+  1. server_info          → "Project: simuru, Ubuntu 24.04, disk 42%, PHP 8.3"
   2. http_health_check    → "HTTP 500"
   3. tail_log laravel.log → "SQLSTATE[HY000] [2002] Connection refused"
   4. ODIN analisis        → {error_type: "db_conn", hints: ["Cek service MySQL..."]}
   5. service_action mysql  → "inactive (dead)" ← DITEMUKAN
   6. service_action restart mysql → [KARTU RISIKO SEDANG → user approve] → "active"
+     Kartu risiko menampilkan: "Prj : simuru → vps-app"
   7. http_health_check    → "HTTP 200" ← SELESAI
 
 User membaca laporan: "MySQL mati, sudah di-restart, website kembali normal."
@@ -411,6 +444,7 @@ Total waktu: < 2 menit. Intervensi user: 1x approve restart MySQL.
 | `SSH_PORT` | `22` | Port SSH |
 | `SSH_KEY` | — | Path private key (opsional) |
 | `PROJECT_ROOT` | cwd | Root aplikasi di server |
+| `PROJECT_NAME` | — | **Baru** — Nama project (di-set via .conf) |
 | `LOCK_CWD_TO_PROJECT` | `0` | `1` = kunci cwd ke PROJECT_ROOT |
 | `ALLOWED_LOG_DIRS` | `/var/log,/var/www,...` | Folder yang boleh dibaca tail_log |
 | `DEFAULT_TIMEOUT` | `180` | Timeout default (detik) |
@@ -428,10 +462,21 @@ Total waktu: < 2 menit. Intervensi user: 1x approve restart MySQL.
 ## Testing
 
 ```bash
-python3 -m pytest tests/ -v          # full test suite (80 tests)
+python3 -m pytest tests/ -v          # full test suite (536 tests)
 python3 -m py_compile server/odin_agent.py
 python3 -m py_compile client/odin_guard.py
+python3 -m py_compile client/odin_cli.py
 ```
+
+**Test coverage v2.0**:
+- Core agent: 48 tests
+- Guard (READ/WRITE classifier + risk engine): 160 tests
+- Guard multi-project: 24 tests (project context, risk cards, warnings)
+- CLI: 24 tests (server/project CRUD, status, switch, run.sh)
+- Memory: 58 tests
+- Output intelligence: 48 tests
+- Profile & mode: 44 tests
+- Fase 2-4: 95 tests
 
 ---
 
@@ -456,9 +501,11 @@ Auto-detect juga mendukung: PostgreSQL, MongoDB, Docker, Apache, Redis, Supervis
 
 | Metrik | Nilai |
 |--------|-------|
-| Total kode | 2852 baris Python (server 2046 + guard 651 + updater 155) |
-| Total test | 3545 baris (485 automated tests, 10 files) |
-| Dependensi runtime | 1 (`mcp[cli]`) |
+| Total kode | ~4195 baris (server 2335 + guard 720 + cli 985 + updater 155) |
+| Total test | ~4100 baris (536 automated tests, 12 files) |
+| CLI commands | **11** (termasuk `project status` & `switch`) |
+| Dependensi server | 1 (`mcp[cli]`) |
+| Dependensi laptop CLI | 2 (`paramiko`, `pyyaml`) |
 | MCP tools | 17 |
 | MCP resources | 2 (`memory://{ns}`, `health://live`) |
 | Error patterns | 23 (18 with suggested_commands) |
@@ -481,11 +528,13 @@ Batas sebenarnya = hak OS user `odin` + sudoers. Hook + `_DANGER_RE` = jaring pe
 
 Filosofi: READ auto-approve, WRITE wajib konfirmasi, katastrofik double-brake. Guard lebih ketat dari server (by design).
 
+**Project awareness** mengurangi risiko "salah project" — setiap risk card menampilkan `Prj : <name> → <server>` sebagai baris pertama. Guard warnings jika project tidak terdaftar.
+
 ---
 
 ## Lisensi & Versi
 
-Versi aktif: **1.3.0** — tersimpan di `__version__` pada kedua file Python.
+Versi aktif: **2.0.0** — tersimpan di `__version__` pada kedua file Python.
 Lihat [CHANGELOG.md](CHANGELOG.md) untuk riwayat perubahan lengkap.
 
-*ODIN v1.3 — ringan, cerdas, aman. Satu file di server, satu file di laptop, otak Claude.*
+*ODIN v2.0 — multi-server, multi-project, workdir-based. Project identity everywhere. Ringan, cerdas, aman. Otak Claude.*

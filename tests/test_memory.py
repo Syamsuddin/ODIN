@@ -30,20 +30,30 @@ spec.loader.exec_module(da)
 
 
 class MemoryTestBase(unittest.TestCase):
-    """Base class: buat tmpdir untuk isolasi memory tiap test."""
+    """Base class: buat tmpdir untuk isolasi memory tiap test (project + cortex)."""
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        self._orig_dir = da.MEMORY_DIR
-        self._orig_file = da.MEMORY_FILE
+        self._orig = {
+            "MEMORY_DIR": da.MEMORY_DIR, "MEMORY_FILE": da.MEMORY_FILE,
+            "GLOBAL_MEMORY_DIR": da.GLOBAL_MEMORY_DIR,
+            "GLOBAL_MEMORY_FILE": da.GLOBAL_MEMORY_FILE,
+            "GLOBAL_EVENTS_FILE": da.GLOBAL_EVENTS_FILE,
+        }
         da.MEMORY_DIR = self.tmpdir
         da.MEMORY_FILE = os.path.join(self.tmpdir, "memory.jsonl")
+        cortex_dir = os.path.join(self.tmpdir, "_cortex")
+        da.GLOBAL_MEMORY_DIR = cortex_dir
+        da.GLOBAL_MEMORY_FILE = os.path.join(cortex_dir, "memory.jsonl")
+        da.GLOBAL_EVENTS_FILE = os.path.join(cortex_dir, "events.jsonl")
         da._fold_invalidate()
+        da._cortex_fold_invalidate()
 
     def tearDown(self):
-        da.MEMORY_DIR = self._orig_dir
-        da.MEMORY_FILE = self._orig_file
+        for k, v in self._orig.items():
+            setattr(da, k, v)
         da._fold_invalidate()
+        da._cortex_fold_invalidate()
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -407,12 +417,13 @@ class TestMemoryForgetTool(MemoryTestBase):
 class TestBuildMemoryDigest(MemoryTestBase):
 
     def test_empty_memory(self):
+        da._cortex_fold_invalidate()
         self.assertEqual(da._build_memory_digest(), "")
 
     def test_digest_contains_profile(self):
         da.memory_write(ns="profile", text="Syams, admin", key="owner")
         digest = da._build_memory_digest()
-        self.assertIn("PROFIL USER", digest)
+        self.assertIn("PROFIL OPERATOR", digest)
         self.assertIn("Syams", digest)
 
     def test_digest_contains_instruction(self):
@@ -431,7 +442,7 @@ class TestBuildMemoryDigest(MemoryTestBase):
     def test_digest_header(self):
         da.memory_write(ns="profile", text="test", key="t")
         digest = da._build_memory_digest()
-        self.assertIn("MEMORY ODIN", digest)
+        self.assertIn("ODIN CORTEX", digest)
 
 
 if __name__ == "__main__":

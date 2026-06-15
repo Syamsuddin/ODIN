@@ -308,5 +308,49 @@ class TestDangerSync(unittest.TestCase):
                             f"guard should catch: {cmd}")
 
 
+# ===========================================================================
+# PROJECT_NAME — project awareness
+# ===========================================================================
+class TestProjectName(unittest.TestCase):
+    def test_project_name_default_empty(self):
+        self.assertEqual(da.PROJECT_NAME, "")
+
+    def test_server_info_has_project_name(self):
+        with patch.object(da, "_run", return_value=(0, "ok", "")):
+            import asyncio
+            result = asyncio.get_event_loop().run_until_complete(
+                da.server_info.__wrapped__()
+            ) if hasattr(da.server_info, '__wrapped__') else None
+        if result is None:
+            self.skipTest("server_info wrapper not accessible")
+        self.assertIn("project_name", result)
+
+    def test_audit_record_has_project(self):
+        import tempfile, json as _json
+        with tempfile.TemporaryDirectory() as td:
+            audit_file = os.path.join(td, "audit.jsonl")
+            with patch.object(da, "AUDIT_ENABLED", True), \
+                 patch.object(da, "AUDIT_FILE", audit_file), \
+                 patch.object(da, "MEMORY_DIR", td), \
+                 patch.object(da, "PROJECT_NAME", "simuru"):
+                da._audit("run_command", "ls", {"success": True, "exit_code": 0, "duration_sec": 0.1})
+            with open(audit_file) as f:
+                record = _json.loads(f.readline())
+            self.assertEqual(record["project"], "simuru")
+
+    def test_audit_project_none_when_empty(self):
+        import tempfile, json as _json
+        with tempfile.TemporaryDirectory() as td:
+            audit_file = os.path.join(td, "audit.jsonl")
+            with patch.object(da, "AUDIT_ENABLED", True), \
+                 patch.object(da, "AUDIT_FILE", audit_file), \
+                 patch.object(da, "MEMORY_DIR", td), \
+                 patch.object(da, "PROJECT_NAME", ""):
+                da._audit("run_command", "ls", {"success": True, "exit_code": 0, "duration_sec": 0.1})
+            with open(audit_file) as f:
+                record = _json.loads(f.readline())
+            self.assertIsNone(record["project"])
+
+
 if __name__ == "__main__":
     unittest.main()

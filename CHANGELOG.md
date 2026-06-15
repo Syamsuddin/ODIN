@@ -4,6 +4,77 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ---
 
+## [2.0.0] — 2026-06-15
+
+### Added — Multi-Project Support & Project Awareness
+
+**CLI Multi-Server & Multi-Project** (`client/odin_cli.py`, 985 baris):
+- `odin server add` — setup server baru secara interaktif (SSH, user odin, venv, mcp[cli], SSH key)
+- `odin server list|remove|test` — kelola server terdaftar
+- `odin project add` — link workdir lokal ke server:project (auto-generate `.claude/settings.json`)
+- `odin project list` — daftar project terdaftar dengan marker `→` untuk project aktif + kolom Mode
+- `odin project status [name]` — **BARU**: validasi project (config lokal + SSH ping server)
+- `odin project switch <name>` — **BARU**: buka tab Terminal baru di workdir project (macOS: `osascript`, fallback: print `cd` command)
+- `odin project remove <name>` — hapus project config
+- `odin update <alias>` — update `odin_agent.py` + `run.sh` di server
+- `odin doctor <alias>` — diagnostik server lengkap
+- Total CLI commands: **11** (naik dari 9)
+
+**Project Identity Everywhere**:
+- **Risk cards** menampilkan project identity sebagai **baris PERTAMA**: `Prj   : <name> → <server>`
+- **Service cards** menampilkan project identity
+- **Guard warnings**: jika project tidak terdaftar di `~/.odin/projects/`, kartu risiko menampilkan `⚠ Project '<name>' tidak terdaftar`
+- **Skill `/odin:status`** menampilkan project sebagai baris pertama: `Project   : <name> → <server> (<mode>)`
+- **`server_info` tool** mengembalikan `project_name` field
+- **Audit log** mencatat `project` field per record
+
+**Multi-Project Infrastructure**:
+- **Multi-project `run.sh`**: terima `--project <name>`, source dari `projects/<name>.conf`, export `PROJECT_NAME` env var
+- **Per-project memory isolation**: `memory/<project>/` di server — setiap project punya `memory.jsonl` dan `audit.jsonl` sendiri
+- **Per-project mode**: `~/.odin/modes/<project>` di laptop — mode operasi terisolasi per project
+- **Workdir-based auto-switching**: `.claude/settings.json` per workdir — switch project = pindah folder, buka Claude Code baru
+- **SSH key per server**: `~/.odin/keys/<alias>` — auto-generate ed25519 key pair saat setup
+- **Config registry**: `~/.odin/servers/`, `~/.odin/projects/` (YAML/JSON)
+- **Dependency CLI** (laptop saja): `paramiko>=3.0`, `pyyaml>=6.0` (`requirements-cli.txt`)
+
+**Guard Project Awareness** (`client/odin_guard.py`, 720 baris):
+- `_detect_project_context()` → tuple `(project_name, server_alias)` dari `.claude/settings.json`
+- `_detect_project()` refactored sebagai thin wrapper ke `_detect_project_context()`
+- `_warn_project_mismatch(project)` cek apakah project terdaftar di `~/.odin/projects/`
+- `risk_card()` dan `service_card()` menerima `project=""` dan `server=""` params
+- Semua inline card builders (laravel_deploy, memory_write, memory_forget, runbook) inject Prj line
+- `_get_mode()` dan `_sync_mode_from_result()` per-project (dari `~/.odin/modes/<project>`)
+
+**Server-Side** (`server/odin_agent.py`, 2335 baris):
+- `PROJECT_NAME` global var dari `os.environ.get("PROJECT_NAME", "")`
+- `server_info()` mengembalikan `project_name` field
+- `_audit()` mencatat `project` field (atau `None` jika kosong)
+- Startup log mencantumkan `PROJECT_NAME`
+
+**Tests Baru** (536 total, naik dari 513):
+- `test_guard_multiproject.py`: 24 tests (naik dari 13) — `TestDetectProjectContext` (3), `TestProjectInRiskCard` (4), `TestWarnProjectMismatch` (4)
+- `test_cli.py`: 24 tests (naik dari 15) — `TestDetectCurrentProject` (3), `TestProjectListEnhanced` (1), `TestProjectStatus` (2), `TestProjectSwitch` (2), `TestRunShProjectName` (1)
+- `test_core.py`: 48 tests (naik dari 44) — `TestProjectName` (4): PROJECT_NAME default, server_info, audit dengan project, audit tanpa project
+
+### Changed
+
+- `run.sh`: tambah `export PROJECT_NAME="${PROJECT_NAME:-}"` setelah source `.conf`
+- `odin_guard.py`: 686 → 720 baris (+34) — project identity di semua risk/service cards
+- `odin_cli.py`: 865 → 985 baris (+120) — `_detect_current_project()`, enhanced list, status, switch
+- `install.sh`: integrasi `install_cli_deps()` + `install_cli_command()` untuk CLI setup
+- `.claude/commands/odin.md`: update banner version dari v1.1 → v2.0
+- `.claude/commands/odin/status.md`: rewrite untuk menampilkan project sebagai baris pertama
+
+### Unchanged
+
+- Security model 4-layer: tidak berubah
+- Memory format (JSONL): tidak berubah
+- Semua 17 MCP tools: tidak berubah
+- Core logic `odin_agent.py`: hanya tambah ~5 baris untuk expose project identity
+- 512 existing tests: tidak ada regresi (536 total = 512 + 24 baru)
+
+---
+
 ## [1.3.0] — 2026-06-10
 
 ### Added — Token Optimization (3 inovasi)

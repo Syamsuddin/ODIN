@@ -20,7 +20,7 @@ Pada error apa pun -> exit 0 tanpa output (jangan memblokir karena bug guard).
 import json
 import os
 
-__version__ = "1.3.0"
+__version__ = "2.1.0"
 import re
 import subprocess
 import sys
@@ -383,17 +383,67 @@ def assess_command(command: str):
             "Tinjau perintah sebelum menyetujui")
 
 
+def _detect_project_context() -> tuple:
+    """Deteksi (project_name, server_alias) dari .claude/settings.json."""
+    cwd = os.environ.get("CLAUDE_WORKING_DIRECTORY", os.getcwd())
+    settings_path = os.path.join(cwd, ".claude", "settings.json")
+    try:
+        with open(settings_path) as f:
+            data = json.load(f)
+        args = data.get("mcpServers", {}).get("odin", {}).get("args", [])
+        server_alias = args[0] if args else ""
+        project = ""
+        for i, arg in enumerate(args):
+            if arg == "--project" and i + 1 < len(args):
+                project = args[i + 1]
+                break
+        return project, server_alias
+    except (FileNotFoundError, json.JSONDecodeError, KeyError, OSError, IndexError):
+        return "", ""
+
+
+def _detect_project() -> str:
+    """Deteksi nama project dari .claude/settings.json di working directory."""
+    return _detect_project_context()[0]
+
+
+def _warn_project_mismatch(project: str) -> str:
+    """Peringatan jika project tidak terdaftar di ~/.odin/projects/."""
+    if not project:
+        return ""
+    projects_dir = os.path.expanduser("~/.odin/projects")
+    if not os.path.isdir(projects_dir):
+        return ""
+    if (os.path.exists(os.path.join(projects_dir, f"{project}.yaml")) or
+            os.path.exists(os.path.join(projects_dir, f"{project}.json"))):
+        return ""
+    return f"⚠ Project '{project}' tidak terdaftar di ~/.odin/projects/. Jalankan: odin project add"
+
+
+_VALID_MODES = ("setup", "deploy", "production")
+
+
 def _get_mode() -> str:
-    """Baca mode operasi ODIN dari file lokal atau env var."""
+    """Baca mode operasi ODIN — per project (v2) atau legacy (v1)."""
+    project = _detect_project()
+    if project:
+        mode_file = os.path.expanduser(f"~/.odin/modes/{project}")
+        try:
+            with open(mode_file) as f:
+                m = f.read().strip().lower()
+                if m in _VALID_MODES:
+                    return m
+        except (FileNotFoundError, PermissionError, OSError):
+            pass
     try:
         with open(os.path.expanduser("~/.odin_mode")) as f:
             m = f.read().strip().lower()
-            if m in ("setup", "deploy", "production"):
+            if m in _VALID_MODES:
                 return m
     except (FileNotFoundError, PermissionError, OSError):
         pass
     m = os.environ.get("ODIN_MODE", "").strip().lower()
-    return m if m in ("setup", "deploy", "production") else "deploy"
+    return m if m in _VALID_MODES else "deploy"
 
 
 def _shift_tier(tier: str) -> str:
@@ -428,14 +478,16 @@ def _undo_hint(command: str) -> str:
 
 
 def risk_card(command: str, extra: str = "", mode: str = "deploy",
-              cwd: str = "") -> str:
+              cwd: str = "", project: str = "", server: str = "") -> str:
     tier, aksi, efek, saran = assess_command(command)
     if mode == "production" and tier != "KRITIS":
         tier = _shift_tier(tier)
     sep = "━" * 40
-    lines = [sep,
-             f"{TIER_ICON.get(tier, '')} RISIKO: {tier}",
-             f"Cmd   : {command}"]
+    lines = [sep]
+    if project:
+        lines.append(f"Prj   : {project} → {server}" if server else f"Prj   : {project}")
+    lines.append(f"{TIER_ICON.get(tier, '')} RISIKO: {tier}")
+    lines.append(f"Cmd   : {command}")
     if cwd:
         lines.append(f"Dir   : {cwd}")
     lines += [f"Aksi  : {aksi}",
@@ -449,6 +501,9 @@ def risk_card(command: str, extra: str = "", mode: str = "deploy",
     if tier == "KRITIS":
         lines.append("⛔ Server akan MENOLAK kecuali allow_dangerous=True (rem darurat). "
                      "Setujui hanya bila benar-benar disengaja.")
+    warn_text = _warn_project_mismatch(project)
+    if warn_text:
+        lines.append(warn_text)
     if extra:
         lines.append(extra)
     lines.append(sep)
@@ -463,24 +518,30 @@ _SVC_RISK = {
 }
 
 
-def service_card(service: str, action: str, mode: str = "deploy") -> str:
+def service_card(service: str, action: str, mode: str = "deploy",
+                 project: str = "", server: str = "") -> str:
     tier, efek, saran = _SVC_RISK.get(action, ("SEDANG", "Mengubah state service", "Tinjau dampak"))
     if mode == "production" and tier != "KRITIS":
         tier = _shift_tier(tier)
     sep = "━" * 40
-    lines = [sep,
-             f"{TIER_ICON.get(tier, '')} RISIKO: {tier}",
-             f"Cmd   : systemctl {action} {service}",
-             f"Aksi  : {efek}",
-             f"Saran : {saran}"]
+    lines = [sep]
+    if project:
+        lines.append(f"Prj   : {project} → {server}" if server else f"Prj   : {project}")
+    lines += [f"{TIER_ICON.get(tier, '')} RISIKO: {tier}",
+              f"Cmd   : systemctl {action} {service}",
+              f"Aksi  : {efek}",
+              f"Saran : {saran}"]
     if mode == "production":
         lines.append("⚠️  Mode PRODUCTION — tier dinaikkan 1 level.")
+    warn_text = _warn_project_mismatch(project)
+    if warn_text:
+        lines.append(warn_text)
     lines.append(sep)
     return "\n".join(lines)
 
 
 def _sync_mode_from_result(data: dict) -> None:
-    """PostToolUse: tulis mode operasi ke ~/.odin_mode dari hasil inspect_server."""
+    """PostToolUse: tulis mode operasi ke file — per project (v2) atau legacy (v1)."""
     tool = data.get("tool_name", "") or ""
     if not tool.endswith("inspect_server"):
         return
@@ -495,10 +556,16 @@ def _sync_mode_from_result(data: dict) -> None:
     mode = ""
     if isinstance(result, dict):
         mode = result.get("mode", "")
-    if mode not in ("setup", "deploy", "production"):
+    if mode not in _VALID_MODES:
         return
     try:
-        path = os.path.expanduser("~/.odin_mode")
+        project = _detect_project()
+        if project:
+            modes_dir = os.path.expanduser("~/.odin/modes")
+            os.makedirs(modes_dir, mode=0o755, exist_ok=True)
+            path = os.path.join(modes_dir, project)
+        else:
+            path = os.path.expanduser("~/.odin_mode")
         with open(path, "w") as f:
             f.write(mode + "\n")
     except OSError:
@@ -518,6 +585,7 @@ def main() -> None:
     tool = data.get("tool_name", "") or ""
     ti = data.get("tool_input", {}) or {}
     mode = _get_mode()
+    _prj, _srv = _detect_project_context()
 
     if tool.endswith("inspect_server"):
         emit("allow", "🟢 AMAN — inspect_server hanya membaca state server (read-only).")
@@ -527,17 +595,18 @@ def main() -> None:
         cwd = ti.get("cwd", "") or ""
         if ti.get("allow_dangerous"):
             emit("ask", risk_card(cmd, "Flag allow_dangerous=True aktif — rem darurat dilepas. "
-                                       "Konfirmasi manual wajib.", mode, cwd))
+                                       "Konfirmasi manual wajib.", mode, cwd,
+                                  project=_prj, server=_srv))
         if classify_command(cmd) == "allow":
             emit("allow", "🟢 AMAN (read-only / inspeksi) — dijalankan otomatis.")
-        emit("ask", risk_card(cmd, mode=mode, cwd=cwd))
+        emit("ask", risk_card(cmd, mode=mode, cwd=cwd, project=_prj, server=_srv))
 
     if tool.endswith("service_action"):
         action = ti.get("action", "status") or "status"
         service = ti.get("service", "") or "?"
         if action in ("status", "is-active", "is-enabled"):
             emit("allow", f"🟢 AMAN — service_action '{action}' read-only — dijalankan otomatis.")
-        emit("ask", service_card(service, action, mode))
+        emit("ask", service_card(service, action, mode, project=_prj, server=_srv))
 
     if tool.endswith("laravel_deploy"):
         app = ti.get("app_path", "?")
@@ -554,16 +623,22 @@ def main() -> None:
         if fpm:
             steps.append(f"reload {fpm}")
         sep = "━" * 40
-        emit("ask", "\n".join([
-            sep,
+        card_lines = [sep]
+        if _prj:
+            card_lines.append(f"Prj   : {_prj} → {_srv}" if _srv else f"Prj   : {_prj}")
+        card_lines += [
             "🟠 RISIKO: TINGGI",
             f"App   : {app}",
             f"Branch: {branch}",
             f"Aksi  : Deploy Laravel — {' → '.join(steps)}",
             "Efek  : Perubahan lokal server HILANG (git reset --hard); skema DB bisa berubah (migrate)",
             "Saran : Pastikan backup DB tersedia; deploy saat trafik rendah",
-            sep,
-        ]))
+        ]
+        warn_text = _warn_project_mismatch(_prj)
+        if warn_text:
+            card_lines.append(warn_text)
+        card_lines.append(sep)
+        emit("ask", "\n".join(card_lines))
 
     if tool.endswith("run_tests"):
         emit("allow", "🟢 AMAN — run_tests hanya membaca & menjalankan test suite.")
@@ -573,25 +648,51 @@ def main() -> None:
         key = ti.get("key", "") or "(auto)"
         text = (ti.get("text") or "")[:100]
         sep = "━" * 40
-        emit("ask", "\n".join([
-            sep,
+        card_lines = [sep]
+        if _prj:
+            card_lines.append(f"Prj   : {_prj} → {_srv}" if _srv else f"Prj   : {_prj}")
+        card_lines += [
             "🟢 RISIKO: RENDAH",
             f"Aksi  : Simpan memory [{ns}] key={key}",
             "Efek  : Entry tersimpan/ditimpa; muncul di konteks sesi berikutnya",
             f"Isi   : {text}{'…' if len(ti.get('text', '')) > 100 else ''}",
             sep,
-        ]))
+        ]
+        emit("ask", "\n".join(card_lines))
 
     if tool.endswith("memory_forget"):
         rid = ti.get("id", "") or f"{ti.get('ns', '')}:{ti.get('key', '')}"
         sep = "━" * 40
-        emit("ask", "\n".join([
-            sep,
+        card_lines = [sep]
+        if _prj:
+            card_lines.append(f"Prj   : {_prj} → {_srv}" if _srv else f"Prj   : {_prj}")
+        card_lines += [
             "🟢 RISIKO: RENDAH",
             f"Aksi  : Hapus memory [{rid}]",
             "Efek  : Entry dihapus (logis); tak muncul di sesi berikutnya",
             sep,
-        ]))
+        ]
+        emit("ask", "\n".join(card_lines))
+
+    if tool.endswith("cortex_log"):
+        ev = ti.get("event", "?")
+        detail = (ti.get("detail") or "")[:80]
+        sev = ti.get("severity", "info")
+        sep = "━" * 40
+        card_lines = [sep]
+        if _prj:
+            card_lines.append(f"Prj   : {_prj} → {_srv}" if _srv else f"Prj   : {_prj}")
+        card_lines += [
+            "🟢 RISIKO: RENDAH",
+            f"Aksi  : Log cortex event [{ev}] severity={sev}",
+            "Efek  : Event tercatat di journal global (visible lintas-project)",
+            f"Detail: {detail}{'…' if len(ti.get('detail', '')) > 80 else ''}",
+            sep,
+        ]
+        emit("ask", "\n".join(card_lines))
+
+    if tool.endswith("cortex_events"):
+        emit("allow", "🟢 AMAN — cortex_events hanya membaca event journal (read-only).")
 
     if tool.endswith("runbook"):
         rb_name = ti.get("name", "?")
@@ -609,15 +710,21 @@ def main() -> None:
         if not has_write:
             emit("allow", f"🟢 AMAN — Runbook '{rb_name}' hanya berisi langkah read-only.")
         sep = "━" * 40
-        emit("ask", "\n".join([
-            sep,
+        card_lines = [sep]
+        if _prj:
+            card_lines.append(f"Prj   : {_prj} → {_srv}" if _srv else f"Prj   : {_prj}")
+        card_lines += [
             f"{TIER_ICON.get(max_tier, '🟡')} RISIKO: {max_tier}",
             f"Aksi  : Runbook '{rb_name}' — {len(rb_steps)} langkah",
             f"Langkah: {' → '.join(labels)}{'…' if len(rb_steps) > 10 else ''}",
             "Efek  : Semua langkah dijalankan berurutan; berhenti pada kegagalan pertama",
             "Saran : Tinjau perintah setiap langkah; risiko = tier langkah paling berisiko",
-            sep,
-        ]))
+        ]
+        warn_text = _warn_project_mismatch(_prj)
+        if warn_text:
+            card_lines.append(warn_text)
+        card_lines.append(sep)
+        emit("ask", "\n".join(card_lines))
 
     if tool.endswith("rollback_plan"):
         emit("allow", "🟢 AMAN — rollback_plan hanya membaca riwayat sesi (read-only).")
