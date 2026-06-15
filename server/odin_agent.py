@@ -1072,6 +1072,153 @@ def _events_read(hours: int = 24, exclude_project: str = "",
     return events[-200:]
 
 
+# ---------------------------------------------------------------------------
+# ORCHESTRATOR: sistem saraf otonom ODIN.
+# Tiga fungsi berjalan otomatis di setiap tool call utama:
+#   _enrich_context  — thalamus: recall memory yang relevan, attach ke result
+#   _suggest_next    — cerebellum: sarankan langkah berikutnya berdasar pola
+#   _check_attention — reticular activating system: flag kondisi penting
+# Dipanggil via _orchestrate() yang di-inject di akhir setiap tool utama.
+# ---------------------------------------------------------------------------
+def _enrich_context(tool_name: str, args: dict) -> list[dict]:
+    """Auto-recall memory yang relevan untuk tool call ini."""
+    terms: list[str] = []
+    if tool_name == "run_command":
+        terms = _tokenize(args.get("command", ""))[:8]
+    elif tool_name == "laravel_deploy":
+        terms = _tokenize("deploy backup migration artisan composer")
+    elif tool_name == "service_action":
+        terms = _tokenize(f"{args.get('service', '')} {args.get('action', '')} service")
+    elif tool_name == "tail_log":
+        terms = _tokenize(args.get("path", ""))
+    elif tool_name == "http_health_check":
+        terms = _tokenize("health check website http error")
+    elif tool_name == "run_tests":
+        terms = _tokenize("test testing phpunit pest")
+    if not terms:
+        return []
+    try:
+        all_items = list(_cortex_fold().values()) + list(_mem_fold().values())
+    except Exception:
+        return []
+    relevant = [r for r in all_items if r.get("ns") in ("instruction", "cross")]
+    if not relevant:
+        return []
+    terms_set = set(terms)
+    scored: list[tuple[int, dict]] = []
+    for r in relevant:
+        doc_tokens = set(_tokenize(_entry_text(r)))
+        overlap = len(terms_set & doc_tokens)
+        if overlap > 0:
+            scored.append((overlap, r))
+    scored.sort(key=lambda x: -x[0])
+    return [{"id": r.get("id"), "key": r.get("key"),
+             "text": r.get("text", "")[:200], "ns": r.get("ns")}
+            for _, r in scored[:3]]
+
+
+_NEXT_STEP_MAP: dict[str, list[dict]] = {
+    "laravel_deploy:ok": [
+        {"tool": "http_health_check", "reason": "verifikasi website setelah deploy"},
+    ],
+    "laravel_deploy:fail": [
+        {"tool": "rollback_plan", "reason": "lihat opsi rollback"},
+        {"tool": "tail_log", "reason": "cek error log Laravel"},
+    ],
+    "service_action:restart": [
+        {"tool": "http_health_check", "reason": "verifikasi setelah restart service"},
+    ],
+    "service_action:reload": [
+        {"tool": "http_health_check", "reason": "verifikasi setelah reload service"},
+    ],
+    "http_health_check:fail": [
+        {"tool": "tail_log", "reason": "cek error log untuk detail"},
+        {"tool": "service_action", "reason": "cek status service (nginx/php-fpm)"},
+    ],
+    "run_tests:fail": [
+        {"tool": "tail_log", "reason": "cek log untuk detail error"},
+    ],
+}
+
+
+def _suggest_next(tool_name: str, args: dict, result: dict) -> list[dict]:
+    """Sarankan langkah berikutnya berdasar pola tool + outcome."""
+    success = result.get("success", True)
+    suggestions: list[dict] = []
+
+    if tool_name in ("laravel_deploy",):
+        key = f"{tool_name}:{'ok' if success else 'fail'}"
+        suggestions.extend(_NEXT_STEP_MAP.get(key, []))
+
+    elif tool_name == "service_action":
+        action = args.get("action", "")
+        if action in ("restart", "reload", "start") and success:
+            suggestions.extend(_NEXT_STEP_MAP.get(f"service_action:{action}", []))
+
+    elif tool_name == "http_health_check" and not success:
+        suggestions.extend(_NEXT_STEP_MAP.get("http_health_check:fail", []))
+
+    elif tool_name == "run_tests" and not success:
+        suggestions.extend(_NEXT_STEP_MAP.get("run_tests:fail", []))
+
+    elif tool_name == "run_command" and result.get("_analysis"):
+        etype = result["_analysis"].get("error_type", "")
+        if "db" in etype or "sql" in etype:
+            suggestions.append({"tool": "service_action",
+                                "reason": f"cek status database (error: {etype})"})
+        if "permission" in etype:
+            suggestions.append({"tool": "run_command",
+                                "reason": "cek ownership/permission file terkait"})
+        if "disk" in etype:
+            suggestions.append({"tool": "run_command",
+                                "reason": "cek disk usage (df -h) dan bersihkan jika perlu"})
+        if "nginx" in etype:
+            suggestions.append({"tool": "run_command",
+                                "reason": "cek nginx config (nginx -t)"})
+
+    return suggestions[:3]
+
+
+def _check_attention(tool_name: str, args: dict, result: dict) -> list[dict]:
+    """Flag kondisi yang perlu perhatian Claude."""
+    flags: list[dict] = []
+    analysis = result.get("_analysis")
+    if analysis and analysis.get("recurring"):
+        etype = analysis.get("error_type", "?")
+        flags.append({
+            "level": "warn",
+            "msg": f"Error '{etype}' BERULANG — pertimbangkan investigasi root cause "
+                   "atau memory_write untuk catat workaround"})
+    try:
+        events = _events_read(hours=6, exclude_project=PROJECT_NAME)
+        warn_events = [e for e in events if e.get("severity") in ("warn", "error")]
+        for ev in warn_events[-2:]:
+            flags.append({
+                "level": "info",
+                "msg": f"[{ev.get('project', '?')}] {ev.get('event', '')}: "
+                       f"{ev.get('detail', '')[:80]}"})
+    except Exception:
+        pass
+    return flags[:5]
+
+
+def _orchestrate(tool_name: str, args: dict, result: dict) -> None:
+    """Sistem saraf otonom: enrich result dengan context, suggestions, attention.
+    Dipanggil di akhir setiap tool execution utama. Tidak mengubah state."""
+    try:
+        ctx = _enrich_context(tool_name, args)
+        if ctx:
+            result["_memory_context"] = ctx
+        nxt = _suggest_next(tool_name, args, result)
+        if nxt:
+            result["_suggested_next"] = nxt
+        att = _check_attention(tool_name, args, result)
+        if att:
+            result["_attention"] = att
+    except Exception:
+        pass
+
+
 def _build_memory_digest() -> str:
     """Cortex (global) + project memory + cross-project events, budget-aware."""
     now = datetime.now(timezone.utc)
@@ -1799,6 +1946,7 @@ def run_command(command: str, cwd: str = "", timeout: int = DEFAULT_TIMEOUT,
 
     _audit("run_command", command, result)
     _session_log("run_command", command, result, pre_state=pre or None, rollback=rb or None)
+    _orchestrate("run_command", {"command": command, "cwd": cwd}, result)
 
     # ── Inovasi 2: slim envelope sebelum return ───────────────────────────
     return _slim(result, command)
@@ -1826,6 +1974,7 @@ def tail_log(path: str, lines: int = 100, grep: str = "") -> dict:
     result = _smart_output(result)
     _audit("tail_log", f"{path} lines={n} grep={grep!r}", result)
     _session_log("tail_log", f"{path} grep={grep!r}", result)
+    _orchestrate("tail_log", {"path": path, "grep": grep}, result)
     return result
 
 
@@ -1860,6 +2009,7 @@ def service_action(service: str, action: str = "status") -> dict:
                  pre_state=pre or None, rollback=rb or None)
     if action in ("restart", "stop", "start", "reload") and result.get("success"):
         _event_append(PROJECT_NAME, f"service_{action}", service)
+    _orchestrate("service_action", {"service": service, "action": action}, result)
     return result
 
 
@@ -2082,6 +2232,7 @@ def laravel_deploy(app_path: str, branch: str = "main", composer: bool = True,
     _session_log("laravel_deploy", f"deploy {branch} -> {app_path}", result)
     sev = "error" if failed else "info"
     _event_append(PROJECT_NAME, "deploy", f"branch={branch} path={app_path} failed={failed}", sev)
+    _orchestrate("laravel_deploy", {"branch": branch, "app_path": app_path}, result)
     return result
 
 
@@ -2108,6 +2259,7 @@ def run_tests(app_path: str, filter: str = "", testsuite: str = "",
         result["_analysis"] = analysis
     _audit("run_tests", f"{app_path} filter={filter!r}", result)
     _session_log("run_tests", f"{app_path} filter={filter!r}", result)
+    _orchestrate("run_tests", {"app_path": app_path}, result)
     return result
 
 
@@ -2132,6 +2284,7 @@ def http_health_check(url: str, expect_status: int = 200, timeout: int = 30) -> 
     r["success"] = status == expect_status
     _audit("http_health_check", f"{url} expect={expect_status}", r)
     _session_log("http_health_check", f"{url} -> {r.get('http_status')}", r)
+    _orchestrate("http_health_check", {"url": url, "expect_status": expect_status}, r)
     return r
 
 
