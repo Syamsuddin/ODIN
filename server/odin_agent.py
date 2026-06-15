@@ -1972,6 +1972,9 @@ def tail_log(path: str, lines: int = 100, grep: str = "") -> dict:
         cmd += f" | grep -i -- {shlex.quote(grep)} || true"
     result = _run(cmd, None, 60)
     result = _smart_output(result)
+    analysis = _analyze_output(result)
+    if analysis:
+        result["_analysis"] = analysis
     _audit("tail_log", f"{path} lines={n} grep={grep!r}", result)
     _session_log("tail_log", f"{path} grep={grep!r}", result)
     _orchestrate("tail_log", {"path": path, "grep": grep}, result)
@@ -2284,6 +2287,9 @@ def http_health_check(url: str, expect_status: int = 200, timeout: int = 30) -> 
     r["success"] = status == expect_status
     _audit("http_health_check", f"{url} expect={expect_status}", r)
     _session_log("http_health_check", f"{url} -> {r.get('http_status')}", r)
+    if not r.get("success"):
+        _event_append(PROJECT_NAME, "health_fail",
+                      f"HTTP {r.get('http_status', '?')} at {url}", "warn")
     _orchestrate("http_health_check", {"url": url, "expect_status": expect_status}, r)
     return r
 
@@ -2302,6 +2308,7 @@ def server_info() -> dict:
     r["agent_mode"] = MODE
     r["ssh_target"] = SSH_TARGET if MODE == "ssh" else None
     r["project_name"] = PROJECT_NAME
+    _audit("server_info", "ringkasan server", r)
     _session_log("server_info", "ringkasan server", r)
     return r
 
@@ -2368,10 +2375,11 @@ def inspect_server() -> dict:
         _CURRENT_MODE = _PROFILE.get("mode", "deploy")
     except Exception as e:
         return {"success": False, "error": f"Inspeksi gagal: {e}"}
-    _session_log("inspect_server", f"type={_PROFILE['type']} mode={_CURRENT_MODE}",
-                 {"success": True})
-    return {"success": True, "profile": _PROFILE, "mode": _CURRENT_MODE,
-            "hint": f"Simpan mode ke laptop agar guard aware: echo '{_CURRENT_MODE}' > ~/.odin_mode"}
+    result = {"success": True, "profile": _PROFILE, "mode": _CURRENT_MODE,
+              "hint": f"Simpan mode ke laptop agar guard aware: echo '{_CURRENT_MODE}' > ~/.odin_mode"}
+    _audit("inspect_server", f"type={_PROFILE['type']} mode={_CURRENT_MODE}", result)
+    _session_log("inspect_server", f"type={_PROFILE['type']} mode={_CURRENT_MODE}", result)
+    return result
 
 
 @mcp.tool()
@@ -2453,6 +2461,9 @@ def runbook(name: str, steps: list[dict], app_path: str = "") -> dict:
     }
     _audit("runbook", f"{name} ({executed}/{total}) failed={failed}", out)
     _session_log("runbook", f"{name} ({executed}/{total})", out)
+    sev = "error" if failed else "info"
+    _event_append(PROJECT_NAME, "runbook", f"{name} ({executed}/{total}) failed={failed}", sev)
+    _orchestrate("runbook", {"name": name, "steps": steps}, out)
     return out
 
 
@@ -2630,6 +2641,7 @@ def memory_write(ns: str, text: str, key: str = "", tags: list[str] | None = Non
         result["_similar_existing"] = similar
         result["_hint"] = ("Ada entry mirip di namespace yang sama. "
                            "Pertimbangkan memory_forget pada yang sudah tidak relevan.")
+    _audit("memory_write", f"ns={ns} key={key or '(auto)'} scope={scope}", result)
     return result
 
 
@@ -2739,7 +2751,9 @@ def memory_forget(id: str = "", ns: str = "", key: str = "") -> dict:
         append_fn({"id": rid, "deleted": True, "created_at": _now_iso()})
     except Exception as e:
         return {"success": False, "error": f"gagal hapus memory: {e}"}
-    return {"success": True, "id": rid, "existed": existed}
+    result = {"success": True, "id": rid, "existed": existed}
+    _audit("memory_forget", f"id={rid} existed={existed}", result)
+    return result
 
 
 @mcp.tool()
@@ -2865,7 +2879,9 @@ def cortex_log(event: str, detail: str = "", severity: str = "info") -> dict:
         _event_append(project, event.strip()[:50], (detail or "").strip(), severity)
     except Exception as e:
         return {"success": False, "error": str(e)}
-    return {"success": True, "project": project, "event": event, "severity": severity}
+    result = {"success": True, "project": project, "event": event, "severity": severity}
+    _audit("cortex_log", f"event={event} severity={severity}", result)
+    return result
 
 
 @mcp.tool()
