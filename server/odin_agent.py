@@ -569,9 +569,18 @@ def _analyze_output(result: dict) -> dict:
         _error_counts[error_type] = _error_counts.get(error_type, 0) + 1
         if _error_counts[error_type] >= 3:
             analysis["recurring"] = True
-            analysis["recurring_hint"] = (
-                f"Error '{error_type}' sudah terjadi {_error_counts[error_type]}x sesi ini. "
-                "Pertimbangkan investigasi root cause atau memory_write untuk catat quirk ini.")
+            cross = _error_counts_at_start.get(error_type, 0)
+            total = _error_counts[error_type]
+            if cross > 0:
+                analysis["recurring_hint"] = (
+                    f"Error '{error_type}' sudah terjadi {total}x "
+                    f"(termasuk {cross}x dari sesi sebelumnya). "
+                    "ODIN akan auto-save lesson ke memory.")
+                analysis["cross_session"] = True
+            else:
+                analysis["recurring_hint"] = (
+                    f"Error '{error_type}' sudah terjadi {total}x sesi ini. "
+                    "ODIN akan auto-save lesson ke memory.")
     return analysis
 
 
@@ -1203,8 +1212,8 @@ def _check_attention(tool_name: str, args: dict, result: dict) -> list[dict]:
 
 
 def _orchestrate(tool_name: str, args: dict, result: dict) -> None:
-    """Sistem saraf otonom: enrich result dengan context, suggestions, attention.
-    Dipanggil di akhir setiap tool execution utama. Tidak mengubah state."""
+    """Sistem saraf otonom: enrich result dengan context, suggestions, attention,
+    dan continuous learning."""
     try:
         ctx = _enrich_context(tool_name, args)
         if ctx:
@@ -1215,8 +1224,188 @@ def _orchestrate(tool_name: str, args: dict, result: dict) -> None:
         att = _check_attention(tool_name, args, result)
         if att:
             result["_attention"] = att
+        learned = _auto_learn(tool_name, args, result)
+        if learned:
+            result["_learned"] = learned
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# CONTINUOUS LEARNING: belajar otomatis dari pengalaman.
+# Tiga loop:
+#   1. Error→Lesson: error berulang → auto-save insight ke memory
+#   2. Cross-Session Error: frekuensi error bertahan lintas sesi
+#   3. Success→Pattern: milestone sukses → simpan pola yang berhasil
+# Dipanggil oleh _orchestrate() via _auto_learn().
+# ---------------------------------------------------------------------------
+_learned_this_session: set[str] = set()
+_error_counts_at_start: dict[str, int] = {}
+_error_freq_save_counter = 0
+
+
+def _load_error_freq() -> None:
+    """Muat frekuensi error lintas-sesi dari memory. Dipanggil saat startup."""
+    global _error_counts, _error_counts_at_start
+    try:
+        fold = _mem_fold()
+        rec = fold.get("server:error-freq")
+        if rec:
+            data = json.loads(rec.get("text", "{}"))
+            if isinstance(data, dict):
+                _error_counts = {k: v for k, v in data.items() if isinstance(v, int)}
+                _error_counts_at_start = dict(_error_counts)
+                if _error_counts:
+                    log.info("Loaded cross-session error freq: %d types", len(_error_counts))
+    except Exception:
+        pass
+
+
+def _save_error_freq() -> None:
+    """Simpan frekuensi error ke memory (periodik, bukan setiap error)."""
+    if not _error_counts:
+        return
+    try:
+        _mem_append({
+            "id": "server:error-freq", "ns": "server", "key": "error-freq",
+            "text": json.dumps(_error_counts, separators=(",", ":")),
+            "tags": ["auto-learn"], "source": "auto-learn",
+            "created_at": _now_iso(), "updated_at": _now_iso(),
+            "pinned": False, "deleted": False,
+        })
+    except Exception:
+        pass
+
+
+def _learn_from_error(analysis: dict, command: str) -> str | None:
+    """Loop 1: Error berulang → simpan lesson ke memory secara otomatis."""
+    error_type = analysis.get("error_type", "")
+    if not error_type or error_type in _learned_this_session:
+        return None
+    if not analysis.get("recurring"):
+        return None
+
+    _learned_this_session.add(error_type)
+    hints = analysis.get("hints", [])
+    suggestions = analysis.get("suggested_commands", [])
+    count = _error_counts.get(error_type, 0)
+    cross = _error_counts_at_start.get(error_type, 0)
+
+    text = f"Error '{error_type}' terdeteksi {count}x"
+    if cross:
+        text += f" (termasuk {cross}x dari sesi sebelumnya)"
+    text += ". "
+    if hints:
+        text += f"Penyebab: {hints[0][:200]}. "
+    if suggestions:
+        cmds = [s.get("cmd", "") for s in suggestions[:3] if s.get("cmd")]
+        if cmds:
+            text += f"Solusi: {'; '.join(cmds)}. "
+    if command:
+        text += f"Terakhir dipicu oleh: {command[:100]}"
+
+    try:
+        _mem_append({
+            "id": f"server:error-lesson-{_slug(error_type)}",
+            "ns": "server", "key": f"error-lesson-{error_type}",
+            "text": text.strip()[:MEMORY_MAX_TEXT],
+            "tags": ["auto-learn", "error-lesson", error_type],
+            "source": "auto-learn",
+            "created_at": _now_iso(), "updated_at": _now_iso(),
+            "pinned": False, "deleted": False,
+        })
+    except Exception:
+        return None
+    return f"Auto-learned: {error_type} → lesson tersimpan di memory"
+
+
+def _learn_from_success(tool_name: str, args: dict, result: dict) -> str | None:
+    """Loop 3: Milestone sukses → simpan pola yang berhasil."""
+    if not result.get("success"):
+        return None
+
+    if tool_name == "laravel_deploy":
+        branch = args.get("branch", "?")
+        recent = _SESSION_LOG[-8:]
+        tools_before = [e["tool"] for e in recent]
+        had_backup = any(
+            "dump" in e.get("summary", "").lower() or "backup" in e.get("summary", "").lower()
+            for e in recent
+        )
+        had_health = any(
+            e["tool"] == "http_health_check" and e.get("success")
+            for e in _SESSION_LOG[-3:]
+        )
+        text = f"Deploy branch '{branch}' berhasil."
+        if had_backup:
+            text += " Backup dilakukan sebelum deploy (BAIK)."
+        else:
+            text += " TANPA backup sebelumnya — pertimbangkan backup di deploy berikutnya."
+        if had_health:
+            text += " Health check passed setelah deploy."
+        text += f" Urutan tool: {' → '.join(tools_before[-5:])}"
+
+        try:
+            _mem_append({
+                "id": "server:last-successful-deploy",
+                "ns": "server", "key": "last-successful-deploy",
+                "text": text[:MEMORY_MAX_TEXT],
+                "tags": ["auto-learn", "success-pattern", "deploy"],
+                "source": "auto-learn",
+                "created_at": _now_iso(), "updated_at": _now_iso(),
+                "expires_at": (datetime.now(timezone.utc) + timedelta(days=90)).isoformat(),
+                "pinned": False, "deleted": False,
+            })
+        except Exception:
+            return None
+        return f"Recorded: deploy sukses (branch={branch}, backup={'ya' if had_backup else 'tidak'})"
+
+    if tool_name == "runbook":
+        name = args.get("name", "?")
+        executed = result.get("executed", 0)
+        total = result.get("total", 0)
+        if executed != total:
+            return None
+        text = f"Runbook '{name}' berhasil ({executed}/{total} steps)."
+        try:
+            _mem_append({
+                "id": f"server:success-runbook-{_slug(name)}",
+                "ns": "server", "key": f"success-runbook-{name}",
+                "text": text[:MEMORY_MAX_TEXT],
+                "tags": ["auto-learn", "success-pattern", "runbook"],
+                "source": "auto-learn",
+                "created_at": _now_iso(), "updated_at": _now_iso(),
+                "expires_at": (datetime.now(timezone.utc) + timedelta(days=90)).isoformat(),
+                "pinned": False, "deleted": False,
+            })
+        except Exception:
+            return None
+        return f"Recorded: runbook '{name}' sukses"
+
+    return None
+
+
+def _auto_learn(tool_name: str, args: dict, result: dict) -> list[str]:
+    """Main learning loop — dipanggil oleh _orchestrate() setelah setiap tool call."""
+    learned: list[str] = []
+
+    analysis = result.get("_analysis")
+    if analysis and analysis.get("recurring"):
+        lesson = _learn_from_error(analysis, args.get("command", ""))
+        if lesson:
+            learned.append(lesson)
+
+    pattern = _learn_from_success(tool_name, args, result)
+    if pattern:
+        learned.append(pattern)
+
+    global _error_freq_save_counter
+    if analysis and analysis.get("error_type"):
+        _error_freq_save_counter += 1
+        if _error_freq_save_counter % 5 == 0:
+            _save_error_freq()
+
+    return learned
 
 
 def _build_memory_digest() -> str:
@@ -1899,6 +2088,16 @@ elif not _try_cached_startup():
         log.warning("inspeksi startup gagal: %s — fallback mode=deploy", e)
 
 mcp = FastMCP("odin", instructions=_build_instructions())
+_load_error_freq()
+
+
+def _shutdown_save():
+    """Simpan state learning saat proses mati (atexit hook)."""
+    if _error_counts:
+        _save_error_freq()
+
+
+atexit.register(_shutdown_save)
 
 
 # ---------------------------------------------------------------------------
