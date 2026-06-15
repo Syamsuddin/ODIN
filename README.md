@@ -8,11 +8,11 @@
 </p>
 
 <p align="center">
-  <a href="#"><img src="https://img.shields.io/badge/MCP_Tools-17-00bcd4?style=flat-square&logo=lightning&logoColor=white" alt="17 MCP Tools"/></a>
+  <a href="#"><img src="https://img.shields.io/badge/MCP_Tools-20-00bcd4?style=flat-square&logo=lightning&logoColor=white" alt="20 MCP Tools"/></a>
   <a href="#"><img src="https://img.shields.io/badge/CLI_Commands-11-4caf50?style=flat-square&logo=terminal&logoColor=white" alt="11 CLI Commands"/></a>
   <a href="#"><img src="https://img.shields.io/badge/Security-4_Layers-e53935?style=flat-square&logo=shield&logoColor=white" alt="4 Security Layers"/></a>
   <a href="#"><img src="https://img.shields.io/badge/Risk_Tiers-5-ff9800?style=flat-square&logo=alert&logoColor=white" alt="5 Risk Tiers"/></a>
-  <a href="#"><img src="https://img.shields.io/badge/Tests-536-9c27b0?style=flat-square&logo=pytest&logoColor=white" alt="536 Tests"/></a>
+  <a href="#"><img src="https://img.shields.io/badge/Tests-664-9c27b0?style=flat-square&logo=pytest&logoColor=white" alt="664 Tests"/></a>
 </p>
 
 <p align="center">
@@ -33,12 +33,14 @@
 | SSH manual, ketik command satu per satu | Instruksi natural language, eksekusi otomatis |
 | Lupa urutan deploy, skip langkah | Workflow konsisten via runbook engine |
 | Error tak terdeteksi sampai user komplain | 23 pola error dianalisis real-time + saran perbaikan |
+| **Error berulang, debugging ulang dari nol** | **Auto-save lesson ke memory — belajar dari pengalaman** |
 | Rollback panik: "commit sebelumnya apa?" | State dicatat otomatis sebelum operasi destruktif |
 | Setiap sesi mulai dari nol | Memory persisten: ODIN ingat server, preferensi, instruksi |
 | Risk fatigue: approve semua tanpa baca | Kartu risiko 5 tier: baca sekilas, putuskan cepat |
 | Server state tak diketahui | Auto-inspect: type, stack, mode terdeteksi otomatis |
 | Satu server, satu project per session | Multi-server, multi-project — switch = pindah folder |
 | Tidak tahu sedang kerja di project mana | Project identity tampil di SETIAP risk card + `/odin:status` |
+| **Context manual: harus ingat recall memory** | **Orchestrator auto-recall memory relevan setiap tool call** |
 
 ---
 
@@ -81,14 +83,19 @@ LAPTOP (Claude Code CLI)                    SERVER(S) (VPS, user: odin)
 ```
 ODIN/
 ├── server/
-│   ├── odin_agent.py        # MCP server (2335 baris) — jalan di VPS
+│   ├── odin_agent.py        # MCP server (2905 baris) — jalan di VPS
+│   │                        # + Orchestrator + Continuous Learning + Cortex
 │   └── run.sh               # Multi-project launcher: --project <name>
 ├── client/
 │   ├── odin_cli.py          # CLI multi-server & multi-project (985 baris)
 │   ├── odin_guard.py        # Risk engine + guard (720 baris) — project-aware
 │   └── update_checker.py    # Cek versi terbaru (155 baris)
-├── tests/                   # 536 tests across 12 files
+├── tests/                   # 664 tests across 15 files
 │   ├── test_core.py         # (48), test_guard.py (160), test_memory.py (58)
+│   ├── test_memory_improvements.py (42)  # Semantic search, staleness, similarity
+│   ├── test_cortex.py       # (40) — Global consciousness + event journal
+│   ├── test_orchestrator.py # (22) — Sistem saraf otonom
+│   ├── test_learning.py     # (24) — Continuous learning (3 loop)
 │   ├── test_output_intelligence.py (48), test_fase2_intelligence.py (25)
 │   ├── test_fase3.py (36), test_fase3_ux.py (32), test_fase4_proactive.py (38)
 │   ├── test_profile_mode.py (44)
@@ -96,8 +103,8 @@ ODIN/
 │   └── test_cli.py          # (24) — CLI + run.sh + project tests
 ├── docs/
 │   └── MEMORY_NOTES.md
-├── install.sh               # Installer v2.0 (macOS & Linux)
-├── install.ps1              # Installer v2.0 (Windows PowerShell)
+├── install.sh               # Installer v2.1 (macOS & Linux)
+├── install.ps1              # Installer v2.1 (Windows PowerShell)
 ├── uninstall.sh / .ps1
 ├── requirements.txt         # Server: mcp[cli]
 ├── requirements-cli.txt     # Laptop CLI: paramiko, pyyaml
@@ -106,11 +113,11 @@ ODIN/
 └── CODING_PLAN_MULTI_PROJECT.md  # Desain multi-project
 ```
 
-**Total**: ~4195 baris source + ~4100 baris test
+**Total**: ~4765 baris source + ~4800 baris test
 
 ---
 
-## 17 Tools MCP + 2 Resources
+## 20 Tools MCP + 2 Resources
 
 ### Eksekusi & Inspeksi
 
@@ -140,14 +147,17 @@ ODIN/
 | `session_history` | Riwayat semua operasi di sesi ini (in-memory, hilang saat respawn) | Otomatis |
 | `audit_tail` | Baca audit log dengan filter (last, tool, success, since) | Otomatis |
 
-### Memory Persisten
+### Memory Persisten & Cortex
 
 | Tool | Fungsi | Approval |
 |------|--------|----------|
-| `memory_write` | Simpan fakta/instruksi yang bertahan lintas sesi | Kartu risiko RENDAH |
-| `memory_recall` | Cari memory berdasarkan namespace/tag/keyword | Otomatis |
+| `memory_write` | Simpan fakta/instruksi yang bertahan lintas sesi (routing otomatis: cortex vs project) | Kartu risiko RENDAH |
+| `memory_recall` | Cari memory berdasarkan namespace/tag/keyword dengan **semantic search TF-IDF** | Otomatis |
 | `memory_forget` | Hapus memory entry (tombstone) | Kartu risiko RENDAH |
-| `memory_digest` | Tampilkan seluruh memory aktif (sama dengan yang di-inject saat startup) | Otomatis |
+| `memory_digest` | Tampilkan cortex (global) + project memory + cross-project events (24j) | Otomatis |
+| `memory_health` | Diagnostik: stale entries, duplicates, namespace counts, file size, event count | Otomatis |
+| `cortex_log` | Log event lintas-project ke cortex event journal (auto-called saat deploy/service restart) | Kartu risiko RENDAH |
+| `cortex_events` | Baca event journal lintas-project (filter: hours, project, limit) | Otomatis |
 
 ### MCP Resources
 
@@ -343,14 +353,96 @@ Pada startup, ODIN menjalankan inspeksi penuh:
 
 **Mode per project**: disimpan di `~/.odin/modes/<project>` dan auto-sync via PostToolUse hook saat `inspect_server`.
 
-### Memory Persisten
+### Memory Persisten & Cortex (Global Consciousness)
 
-3 namespace: `server` (fakta infrastruktur), `instruction` (arahan user), `profile` (identitas).
-- Append-only JSONL + fold (last-write-wins, tombstone, TTL)
-- Auto-inject ke konteks saat spawn — setiap sesi baru langsung "ingat"
-- Compaction otomatis saat melebihi `MEMORY_MAX_ENTRIES`
-- Storage di luar webroot dan `PROJECT_ROOT` — aman dari deploy & run_command
-- **Isolated per project**: `memory/<project>/` di server
+**Arsitektur 2-layer**:
+- **Cortex** (global): `memory/_cortex/` — namespace `profile` (operator) + `cross` (lintas-project)
+- **Project** (isolated): `memory/<project>/` — namespace `server` (fakta infra) + `instruction` (arahan)
+
+**Fitur intelligence**:
+- **Semantic search TF-IDF** di `memory_recall` — ranking relevansi (stdlib-only, no deps)
+- **Staleness detection**: entry > 30 hari dapat marker `[STALE?]` di digest
+- **Similarity detection**: `memory_write` warning jika ada entry mirip (Jaccard >= 0.45)
+- **Digest budget**: max 3000 chars, prioritas profile > instruction > server (newest first)
+- **Event journal**: cross-project events auto-logged saat deploy/service restart → 24h digest
+- **Auto-inject** ke konteks: cortex + project + cross-project events → Claude langsung aware
+
+**Continuous learning** (otomatis):
+- Error berulang (≥3x) → auto-save lesson ke `server:error-lesson-*`
+- Deploy/runbook sukses → auto-save pattern ke `server:last-successful-deploy`
+- Error frequency bertahan lintas sesi via `server:error-freq`
+
+Storage: append-only JSONL + fold (last-write-wins, tombstone, TTL), compaction otomatis, di luar webroot
+
+### Orchestrator — Sistem Saraf Otonom
+
+**Berjalan otomatis** di setiap tool call utama (6 tools: run_command, tail_log, service_action, laravel_deploy, run_tests, http_health_check). Memperkaya result dengan:
+
+1. **`_memory_context`** (Thalamus — auto-recall):
+   - Recall memory relevan berdasarkan tool + args (TF-IDF token overlap)
+   - Maks 3 entry dari namespace `instruction` + `cross`
+   - Claude dapat context tanpa harus ingat memanggil `memory_recall`
+
+2. **`_suggested_next`** (Cerebellum — pattern-based suggestion):
+   - Deploy sukses → "http_health_check"
+   - Deploy gagal → "rollback_plan" + "tail_log"
+   - Service restart → "http_health_check"
+   - Error DB → "service_action untuk cek MySQL"
+   - Error permission → "cek ownership/permission file"
+
+3. **`_attention`** (RAS — alert system):
+   - Error berulang → "BERULANG — pertimbangkan investigasi root cause"
+   - Cross-project events (6j terakhir, severity warn/error) → info dari project lain
+
+4. **`_learned`** (Auto-learning):
+   - Error berulang → "Auto-learned: db_conn → lesson tersimpan"
+   - Deploy sukses → "Recorded: deploy sukses (branch=main, backup=ya)"
+
+**Transparan**: Claude melihat semua enrichment di result dict. ODIN tidak mengubah state — hanya memberikan context yang lebih kaya.
+
+### Continuous Learning — Belajar dari Pengalaman
+
+**3 learning loop otomatis**:
+
+#### Loop 1: Error → Lesson
+
+Saat error terjadi ≥3x dalam sesi:
+- Auto-save ke memory: `server:error-lesson-{type}`
+- Isi: penyebab, solusi, command pemicu, frekuensi (termasuk cross-session)
+- Satu lesson per error type per sesi (tidak spam)
+- Orchestrator auto-recall lesson ini di tool call berikutnya yang relevan
+
+Contoh:
+```
+Error 'db_conn' terdeteksi 5x (termasuk 2x dari sesi sebelumnya).
+Penyebab: MySQL connection refused. 
+Solusi: systemctl status mysql; systemctl restart mysql.
+Terakhir dipicu: php artisan migrate
+```
+
+#### Loop 2: Cross-Session Error Tracking
+
+Error frequency **bertahan lintas sesi**:
+- `_error_counts` disimpan ke `server:error-freq` saat shutdown (atexit hook)
+- Load saat startup → error 2x sesi kemarin + 1x sesi ini = recurring terdeteksi
+- `_analyze_output` menandai `cross_session: true` di analysis
+- Recurring hint: "Error 'db_conn' sudah terjadi 4x (termasuk 3x dari sesi sebelumnya)"
+
+#### Loop 3: Success → Pattern
+
+Milestone sukses auto-save pola:
+- **laravel_deploy** sukses → `server:last-successful-deploy`
+  - Mencatat: branch, apakah backup dilakukan, health check passed, urutan tool
+  - Contoh: "Deploy branch 'hotfix' berhasil. Backup dilakukan sebelum deploy (BAIK). Health check passed. Urutan: run_command → laravel_deploy → http_health_check"
+- **runbook** sukses (executed = total) → `server:success-runbook-{name}`
+- TTL 90 hari (auto-expire)
+
+**Siklus belajar**:
+```
+Sesi 1: Error db_conn 3x → ODIN auto-save lesson
+Sesi 2: Error db_conn lagi → Orchestrator auto-recall lesson → 
+        Claude: "Saya ingat masalah ini. Cek MySQL dulu." → langsung fix
+```
 
 ### Audit Log
 
@@ -462,18 +554,22 @@ Total waktu: < 2 menit. Intervensi user: 1x approve restart MySQL.
 ## Testing
 
 ```bash
-python3 -m pytest tests/ -v          # full test suite (536 tests)
+python3 -m pytest tests/ -v          # full test suite (664 tests)
 python3 -m py_compile server/odin_agent.py
 python3 -m py_compile client/odin_guard.py
 python3 -m py_compile client/odin_cli.py
 ```
 
-**Test coverage v2.0**:
+**Test coverage v2.1**:
 - Core agent: 48 tests
 - Guard (READ/WRITE classifier + risk engine): 160 tests
 - Guard multi-project: 24 tests (project context, risk cards, warnings)
 - CLI: 24 tests (server/project CRUD, status, switch, run.sh)
 - Memory: 58 tests
+- **Memory improvements: 42 tests** (semantic search, staleness, similarity)
+- **Cortex: 40 tests** (global consciousness, event journal, routing)
+- **Orchestrator: 22 tests** (enrich_context, suggest_next, check_attention)
+- **Continuous learning: 24 tests** (error→lesson, cross-session, success pattern)
 - Output intelligence: 48 tests
 - Profile & mode: 44 tests
 - Fase 2-4: 95 tests
@@ -501,12 +597,12 @@ Auto-detect juga mendukung: PostgreSQL, MongoDB, Docker, Apache, Redis, Supervis
 
 | Metrik | Nilai |
 |--------|-------|
-| Total kode | ~4195 baris (server 2335 + guard 720 + cli 985 + updater 155) |
-| Total test | ~4100 baris (536 automated tests, 12 files) |
-| CLI commands | **11** (termasuk `project status` & `switch`) |
+| Total kode | **~4765 baris** (server 2905 + guard 720 + cli 985 + updater 155) |
+| Total test | **~4800 baris** (664 automated tests, 15 files) |
+| CLI commands | 11 (termasuk `project status` & `switch`) |
 | Dependensi server | 1 (`mcp[cli]`) |
 | Dependensi laptop CLI | 2 (`paramiko`, `pyyaml`) |
-| MCP tools | 17 |
+| MCP tools | **20** (termasuk cortex_log, cortex_events, memory_health) |
 | MCP resources | 2 (`memory://{ns}`, `health://live`) |
 | Error patterns | 23 (18 with suggested_commands) |
 | Risk rules | 26 shell + DB assessor |
@@ -516,7 +612,9 @@ Auto-detect juga mendukung: PostgreSQL, MongoDB, Docker, Apache, Redis, Supervis
 | Risk tiers | 5 (AMAN / RENDAH / SEDANG / TINGGI / KRITIS) |
 | Operation modes | 3 (setup / deploy / production) |
 | Security layers | 4 (classifier → risk engine → hard-block → OS) |
-| Memory namespaces | 3 (server / instruction / profile) |
+| Memory namespaces | **4** (cortex: profile, cross; project: server, instruction) |
+| **Learning loops** | **3** (error→lesson, cross-session tracking, success pattern) |
+| **Orchestrator functions** | **4** (enrich_context, suggest_next, check_attention, auto_learn) |
 | Framework | Tidak ada — pure Python + FastMCP |
 | Overhead server | 0 (spawn-per-session, tidak ada daemon) |
 
@@ -534,7 +632,7 @@ Filosofi: READ auto-approve, WRITE wajib konfirmasi, katastrofik double-brake. G
 
 ## Lisensi & Versi
 
-Versi aktif: **2.0.0** — tersimpan di `__version__` pada kedua file Python.
+Versi aktif: **2.1.0** — tersimpan di `__version__` pada kedua file Python.
 Lihat [CHANGELOG.md](CHANGELOG.md) untuk riwayat perubahan lengkap.
 
-*ODIN v2.0 — multi-server, multi-project, workdir-based. Project identity everywhere. Ringan, cerdas, aman. Otak Claude.*
+*ODIN v2.1 — multi-server, multi-project, workdir-based. Continuous learning. Orchestrator. Cortex consciousness. Project identity everywhere. Ringan, cerdas, belajar dari pengalaman.*
