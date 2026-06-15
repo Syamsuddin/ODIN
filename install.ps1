@@ -178,6 +178,13 @@ Write-Host ""
 Write-Host "  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Green
 Write-Host "    ✓ ODIN v$version terinstall" -ForegroundColor Green
 Write-Host "  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Green
+Write-Host ""
+Write-Host "  Fitur v2.1:" -ForegroundColor White
+Write-Host "    • " -NoNewline; Write-Host "Continuous Learning" -ForegroundColor Cyan -NoNewline; Write-Host " — belajar dari error & sukses"
+Write-Host "    • " -NoNewline; Write-Host "Orchestrator" -ForegroundColor Cyan -NoNewline; Write-Host " — auto-recall memory relevan"
+Write-Host "    • " -NoNewline; Write-Host "Cortex" -ForegroundColor Cyan -NoNewline; Write-Host " — consciousness lintas-project"
+Write-Host "    • " -NoNewline; Write-Host "20 MCP tools" -ForegroundColor Cyan -NoNewline; Write-Host ", " -NoNewline; Write-Host "664 tests" -ForegroundColor Cyan -NoNewline; Write-Host ", " -NoNewline; Write-Host "4 memory namespace" -ForegroundColor Cyan
+Write-Host ""
 
 # Cek apakah sudah ada server terdaftar
 $hasServers = (Test-Path "$env:USERPROFILE\.odin\servers\*.yaml") -or (Test-Path "$env:USERPROFILE\.odin\servers\*.json")

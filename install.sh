@@ -797,6 +797,11 @@ main() {
     printf "\n${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
     printf "${BOLD}${GREEN}  ✓ ODIN v${version} terinstall${NC}\n"
     printf "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n\n"
+    printf "  ${BOLD}Fitur v2.1:${NC}\n"
+    printf "    • ${CYAN}Continuous Learning${NC} — belajar dari error & sukses\n"
+    printf "    • ${CYAN}Orchestrator${NC} — auto-recall memory relevan\n"
+    printf "    • ${CYAN}Cortex${NC} — consciousness lintas-project\n"
+    printf "    • ${CYAN}20 MCP tools${NC}, ${CYAN}664 tests${NC}, ${CYAN}4 memory namespace${NC}\n\n"
 
     # Cek apakah sudah ada server terdaftar (v2.0 style)
     local has_servers=false
