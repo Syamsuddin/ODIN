@@ -306,6 +306,11 @@ args = []
 if is_alias:
     args = [ssh_target, run_path]
 else:
+    # Hermetik: -F /dev/null mengabaikan ~/.ssh/config sepenuhnya, sehingga koneksi
+    # kebal terhadap global-leak / port tertukar / korupsi linter pada config itu.
+    # Semua opsi DITULIS SEBELUM host (penting di macOS: BSD getopt tak permutasi,
+    # opsi setelah host akan dianggap bagian remote command).
+    args += ['-F', '/dev/null']
     if ssh_port != '22':
         args += ['-p', ssh_port]
     args += ['-o', 'StrictHostKeyChecking=accept-new']
@@ -690,7 +695,10 @@ export DEPLOY_MODE=local
 export PROJECT_ROOT=${project_root}
 export ALLOWED_LOG_DIRS=${log_dirs}
 export MEMORY_DIR=/home/odin/memory
-cd "\$PROJECT_ROOT" || { echo "FATAL: \$PROJECT_ROOT tidak bisa diakses" >&2; exit 1; }
+# ODIN jalan dari /home/odin, BUKAN dari app dir (isolasi konteks): hindari FastMCP
+# membaca .env app yang tak terbaca, dan hapus chicken-and-egg PROJECT_ROOT saat
+# setup LEMP. PROJECT_ROOT tetap dipakai run_command sebagai parameter per-perintah.
+cd /home/odin || { echo "FATAL: /home/odin tidak bisa diakses" >&2; exit 1; }
 exec /home/odin/.venv/bin/python /home/odin/odin_agent.py
 RUNEOF
     if ssh_upload "$tmp_run" "/tmp/odin_run.sh"; then

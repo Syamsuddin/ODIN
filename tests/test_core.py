@@ -136,6 +136,44 @@ class TestBuildInvocation(unittest.TestCase):
 
 
 # ===========================================================================
+# _resolve_default_cwd — isolasi konteks P0 (ODIN tak chdir ke app dir;
+# default cwd ditambahkan di level perintah)
+# ===========================================================================
+class TestResolveDefaultCwd(unittest.TestCase):
+
+    def test_explicit_cwd_honored(self):
+        # cwd eksplisit selalu dipakai apa adanya, tanpa cek isdir
+        with patch.object(da, "PROJECT_ROOT", "/var/www/app"), \
+             patch.object(da, "MODE", "local"):
+            self.assertEqual(da._resolve_default_cwd("/tmp/x"), "/tmp/x")
+
+    def test_empty_defaults_to_project_root_when_exists(self):
+        with patch.object(da, "PROJECT_ROOT", "/var/www/app"), \
+             patch.object(da, "MODE", "local"), \
+             patch.object(da.os.path, "isdir", lambda p: p == "/var/www/app"):
+            self.assertEqual(da._resolve_default_cwd(""), "/var/www/app")
+
+    def test_empty_returns_none_when_root_missing(self):
+        # mode SETUP: /var/www/app belum dibuat → None (jalan di home ODIN, bukan crash)
+        with patch.object(da, "PROJECT_ROOT", "/var/www/app"), \
+             patch.object(da, "MODE", "local"), \
+             patch.object(da.os.path, "isdir", lambda p: False):
+            self.assertIsNone(da._resolve_default_cwd(""))
+
+    def test_empty_returns_none_without_project_root(self):
+        with patch.object(da, "PROJECT_ROOT", ""), \
+             patch.object(da, "MODE", "local"):
+            self.assertIsNone(da._resolve_default_cwd(""))
+
+    def test_ssh_mode_uses_root_without_local_isdir(self):
+        # mode ssh: PROJECT_ROOT remote → jangan cek isdir lokal
+        with patch.object(da, "PROJECT_ROOT", "/var/www/app"), \
+             patch.object(da, "MODE", "ssh"), \
+             patch.object(da.os.path, "isdir", lambda p: False):
+            self.assertEqual(da._resolve_default_cwd(""), "/var/www/app")
+
+
+# ===========================================================================
 # _DANGER_RE — hard-block pada server
 # ===========================================================================
 class TestDangerRE(unittest.TestCase):

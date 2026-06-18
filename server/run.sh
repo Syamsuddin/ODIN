@@ -54,5 +54,13 @@ export ALLOWED_LOG_DIRS
 export MEMORY_DIR
 export GLOBAL_MEMORY_DIR="${GLOBAL_MEMORY_DIR:-$ODIN_HOME/memory/_cortex}"
 
-cd "$PROJECT_ROOT" || { echo "FATAL: $PROJECT_ROOT tidak bisa diakses" >&2; exit 1; }
+# ODIN dijalankan dari ODIN_HOME, BUKAN dari app dir. Alasan (isolasi konteks P0):
+#   - Proses ODIN tak boleh mewarisi konteks project. FastMCP/pydantic-settings
+#     otomatis membaca ./.env dari CWD; app dir (mis. /var/www/<proj>) kerap punya
+#     .env milik www-data (mode 640) yang tak terbaca user odin → crash. Idem untuk
+#     .git/composer.json/vendor yang bisa salah ke-pickup.
+#   - Menghapus chicken-and-egg: PROJECT_ROOT tak harus sudah ada saat fase SETUP LEMP.
+# PROJECT_ROOT tetap di-export sebagai PARAMETER; run_command yang men-`cd` ke sana
+# per-perintah (lihat _resolve_default_cwd di odin_agent.py).
+cd "$ODIN_HOME" || { echo "FATAL: ODIN_HOME '$ODIN_HOME' tidak bisa diakses" >&2; exit 1; }
 exec "$ODIN_HOME/.venv/bin/python" "$ODIN_HOME/odin_agent.py"

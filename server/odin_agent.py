@@ -399,6 +399,21 @@ def _build_invocation(command: str, cwd: str | None) -> list[str]:
     return ["bash", "-lc", remote_cmd]
 
 
+def _resolve_default_cwd(cwd: str) -> str | None:
+    """Resolusi cwd untuk run_command. cwd EKSPLISIT dihormati apa adanya. cwd KOSONG
+    → default cerdas ke PROJECT_ROOT bila layak, jika tidak None (perintah jalan di
+    home ODIN). ODIN sendiri TIDAK pernah chdir ke app dir (lihat run.sh): default ini
+    hanya menambah `cd <root> &&` di level PERINTAH, bukan CWD proses — sehingga
+    konteks runtime ODIN tetap terisolasi dari project (tak baca .env/.git app)."""
+    if cwd:
+        return cwd
+    if not PROJECT_ROOT:
+        return None
+    if MODE == "ssh":
+        return PROJECT_ROOT          # target remote; biar `cd` remote yang memvalidasi
+    return PROJECT_ROOT if os.path.isdir(PROJECT_ROOT) else None
+
+
 def _run(command: str, cwd: str | None = None, timeout: int = DEFAULT_TIMEOUT,
          allow_dangerous: bool = False) -> dict:
     timeout = max(1, min(int(timeout), MAX_TIMEOUT))
@@ -2038,6 +2053,15 @@ def _build_instructions() -> str:
                       "Override: memory_write(ns='server', key='mode-override', text='deploy')\n")
     elif _CURRENT_MODE == "setup":
         mode_info += "Mode SETUP — toleransi tinggi untuk konfigurasi infrastruktur.\n"
+        if PROJECT_ROOT:
+            wr_exists = os.path.isdir(PROJECT_ROOT)
+            mode_info += (f"Web-root target: {PROJECT_ROOT} "
+                          f"({'sudah ada' if wr_exists else 'BELUM ada'}).\n")
+            if not wr_exists:
+                mode_info += (
+                    f"Folder ini SENGAJA belum dibuat. Saat setup LEMP/install web server, "
+                    f"buat folder ini (mkdir -p {PROJECT_ROOT}, chown www-data) lalu arahkan "
+                    f"document root nginx ke sini. Lihat memory 'server:web-root' untuk detail.\n")
     else:
         mode_info += "Mode DEPLOY — operasi standar, WRITE perlu konfirmasi user.\n"
     return digest + mode_info
@@ -2077,6 +2101,46 @@ def _try_cached_startup() -> bool:
         return False
 
 
+def _seed_web_root_note() -> None:
+    """Catat PROJECT_ROOT sebagai NIAT web-root (bukan prasyarat) ke memory.
+
+    Workflow: saat setup server/project user menentukan web-root. Folder ini BELUM
+    tentu ada — nginx pun mungkin belum terinstall. Alih-alih memaksa folder ada
+    (dulu run.sh fatal bila tidak ada), path-nya disimpan sebagai catatan durable.
+    Saat ODIN setup LEMP, catatan ini jadi sumber kebenaran: folder yang harus
+    dibuat + document root nginx. Idempoten: hanya menulis bila isinya berubah
+    (mis. folder akhirnya dibuat → status di catatan ikut ter-update)."""
+    if not PROJECT_ROOT:
+        return
+    try:
+        exists = os.path.isdir(PROJECT_ROOT)
+        proj = PROJECT_NAME or os.path.basename(PROJECT_ROOT) or "project"
+        text = (
+            f"Web-root target project '{proj}': {PROJECT_ROOT} "
+            f"(status: {'sudah ada' if exists else 'BELUM dibuat'}).\n"
+            f"Catatan ini NIAT konfigurasi, bukan prasyarat — folder dibuat oleh agent "
+            f"saat setup LEMP, bukan oleh run.sh. Tugas ODIN saat install web server:\n"
+            f"  1. mkdir -p {PROJECT_ROOT} && chown -R www-data:www-data {PROJECT_ROOT}\n"
+            f"  2. set document root nginx: 'root {PROJECT_ROOT};' "
+            f"(Laravel: 'root {PROJECT_ROOT}/public;')."
+        )[:MEMORY_MAX_TEXT]
+        rec = _mem_fold().get("server:web-root")
+        if rec and rec.get("text", "") == text:
+            return  # tidak berubah → jangan tulis ulang (hindari bloat log)
+        _mem_append({
+            "id": "server:web-root",
+            "ns": "server", "key": "web-root",
+            "text": text,
+            "tags": ["web-root", "setup-intent", "config", "lemp"],
+            "source": "startup-seed",
+            "created_at": _now_iso(), "updated_at": _now_iso(),
+            "pinned": True, "deleted": False,
+        })
+        log.info("Seed web-root note: %s (exists=%s)", PROJECT_ROOT, exists)
+    except Exception:
+        log.debug("seed web-root note gagal", exc_info=True)
+
+
 # Inspeksi saat startup (lewati jika ODIN_SKIP_INSPECT=1, mis. saat testing)
 if os.environ.get("ODIN_SKIP_INSPECT", "").strip() in ("1", "true", "yes"):
     log.info("ODIN_SKIP_INSPECT=1 — inspeksi dilewati")
@@ -2087,7 +2151,29 @@ elif not _try_cached_startup():
     except Exception as e:
         log.warning("inspeksi startup gagal: %s — fallback mode=deploy", e)
 
-mcp = FastMCP("odin", instructions=_build_instructions())
+# Catat niat web-root SEBELUM membangun instructions agar muncul di memory digest.
+_seed_web_root_note()
+
+# FastMCP (via pydantic-settings) otomatis membaca ./.env dari CWD saat init. Bila
+# ODIN dijalankan dari dalam app dir (mis. /var/www/<proj>) yang punya .env milik
+# www-data (mode 640, tak terbaca user odin), pembacaan itu CRASH dengan
+# PermissionError. .env aplikasi BUKAN config ODIN — jadi init FastMCP dari
+# ODIN_HOME (folder agent ini, tanpa .env asing), lalu kembali ke cwd semula agar
+# default cwd run_command tidak berubah.
+_ODIN_HOME = os.path.dirname(os.path.abspath(__file__))
+try:
+    _cwd_before = os.getcwd()
+except OSError:
+    _cwd_before = None
+try:
+    os.chdir(_ODIN_HOME)
+    mcp = FastMCP("odin", instructions=_build_instructions())
+finally:
+    if _cwd_before:
+        try:
+            os.chdir(_cwd_before)
+        except OSError:
+            pass
 _load_error_freq()
 
 
@@ -2121,16 +2207,19 @@ def run_command(command: str, cwd: str = "", timeout: int = DEFAULT_TIMEOUT,
     if block:
         return block
 
+    # Resolusi default cwd (kosong → PROJECT_ROOT bila layak) — isolasi konteks P0.
+    _cwd = _resolve_default_cwd(cwd)
+
     # ── Inovasi 1: cache check untuk READ-only command ───────────────────
-    _cwd_key = cwd or ""
+    _cwd_key = _cwd or ""
     cached = _cache_get(command, _cwd_key)
     if cached:
         cached["_summary"] = f"✓ CACHE ({cached['_cache_age_sec']}s) — {command}"
         _session_log("run_command", command, cached)
         return _slim(cached, command)   # slim juga berlaku untuk cache hit
 
-    pre = _capture_pre_state(command, cwd or None)
-    result = _run(command, cwd or None, timeout, allow_dangerous)
+    pre = _capture_pre_state(command, _cwd)
+    result = _run(command, _cwd, timeout, allow_dangerous)
     analysis = _analyze_output(result)
     if analysis:
         result["_analysis"] = analysis
@@ -2145,7 +2234,7 @@ def run_command(command: str, cwd: str = "", timeout: int = DEFAULT_TIMEOUT,
 
     _audit("run_command", command, result)
     _session_log("run_command", command, result, pre_state=pre or None, rollback=rb or None)
-    _orchestrate("run_command", {"command": command, "cwd": cwd}, result)
+    _orchestrate("run_command", {"command": command, "cwd": _cwd or ""}, result)
 
     # ── Inovasi 2: slim envelope sebelum return ───────────────────────────
     return _slim(result, command)

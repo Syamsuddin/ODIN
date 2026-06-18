@@ -1,5 +1,5 @@
 """Test Server Profile, Mode Derivation, dan Mode Enforcement."""
-import sys, types, os, unittest
+import sys, types, os, tempfile, unittest
 from unittest.mock import patch, MagicMock
 from pathlib import Path
 
@@ -384,6 +384,78 @@ class TestRunCommandModeGate(unittest.TestCase):
                                  "exit_code": 0, "duration_sec": 0.1}
         result = da.run_command("cat /etc/nginx/nginx.conf", "/tmp")
         self.assertTrue(result["success"])
+
+
+# ===========================================================================
+# Web-root sebagai NIAT (catatan memory), bukan prasyarat run.sh
+# ===========================================================================
+class TestWebRootNote(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig = {"MEMORY_DIR": da.MEMORY_DIR, "MEMORY_FILE": da.MEMORY_FILE,
+                      "PROJECT_ROOT": da.PROJECT_ROOT, "PROJECT_NAME": da.PROJECT_NAME,
+                      "_CURRENT_MODE": da._CURRENT_MODE}
+        da.MEMORY_DIR = self.tmpdir
+        da.MEMORY_FILE = os.path.join(self.tmpdir, "memory.jsonl")
+        da.PROJECT_ROOT = "/var/www/proyek-baru"
+        da.PROJECT_NAME = "proyek-baru"
+        da._fold_invalidate()
+
+    def tearDown(self):
+        for k, v in self._orig.items():
+            setattr(da, k, v)
+        da._fold_invalidate()
+
+    def _lines(self):
+        if not os.path.exists(da.MEMORY_FILE):
+            return 0
+        return sum(1 for ln in open(da.MEMORY_FILE) if ln.strip())
+
+    def _patch_root_isdir(self, present):
+        """Patch isdir HANYA untuk PROJECT_ROOT; path lain pakai isdir asli
+        (mem-patch global merusak os.makedirs(exist_ok=True))."""
+        real = os.path.isdir
+        return patch.object(da.os.path, "isdir",
+                            side_effect=lambda p: present if p == da.PROJECT_ROOT else real(p))
+
+    def test_seed_creates_pinned_note_when_dir_missing(self):
+        with self._patch_root_isdir(False):
+            da._seed_web_root_note()
+        rec = da._mem_fold().get("server:web-root")
+        self.assertIsNotNone(rec)
+        self.assertTrue(rec["pinned"])
+        self.assertIn("web-root", rec["tags"])
+        self.assertIn("/var/www/proyek-baru", rec["text"])
+        self.assertIn("BELUM dibuat", rec["text"])
+
+    def test_seed_is_idempotent(self):
+        with self._patch_root_isdir(False):
+            da._seed_web_root_note()
+            da._seed_web_root_note()
+            da._seed_web_root_note()
+        self.assertEqual(self._lines(), 1)
+
+    def test_note_updates_when_dir_created(self):
+        with self._patch_root_isdir(False):
+            da._seed_web_root_note()
+        with self._patch_root_isdir(True):
+            da._seed_web_root_note()
+        rec = da._mem_fold().get("server:web-root")
+        self.assertIn("sudah ada", rec["text"])
+        self.assertEqual(self._lines(), 2)  # 1 awal + 1 update
+
+    def test_no_seed_without_project_root(self):
+        da.PROJECT_ROOT = ""
+        da._seed_web_root_note()
+        self.assertEqual(self._lines(), 0)
+
+    def test_setup_instructions_mention_webroot_and_nginx(self):
+        da._CURRENT_MODE = "setup"
+        with self._patch_root_isdir(False):
+            ins = da._build_instructions()
+        self.assertIn("/var/www/proyek-baru", ins)
+        self.assertIn("mkdir", ins)
+        self.assertIn("document root", ins)
 
 
 if __name__ == "__main__":
