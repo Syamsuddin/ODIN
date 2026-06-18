@@ -54,6 +54,20 @@ export ALLOWED_LOG_DIRS
 export MEMORY_DIR
 export GLOBAL_MEMORY_DIR="${GLOBAL_MEMORY_DIR:-$ODIN_HOME/memory/_cortex}"
 
+# --- P1: bind conf ke IDENTITAS server (anti mis-route) ---
+# machine-id = ID unik & stabil per mesin Linux (tak berubah saat hostname/IP ganti).
+# Pertama kali (SERVER_ID belum ada di conf) → auto-seed ke conf. Run berikutnya,
+# odin_agent.py membandingkan SERVER_ID vs machine-id aktual & menolak bila beda —
+# sehingga koneksi MCP yang nyasar ke server salah GAGAL LOUD, bukan diam-diam.
+_MACHINE_ID="$(cat /etc/machine-id 2>/dev/null || cat /var/lib/dbus/machine-id 2>/dev/null || echo '')"
+if [[ -n "$_MACHINE_ID" && -z "${SERVER_ID:-}" && -n "${CONF:-}" && -f "${CONF:-}" ]]; then
+    printf '\n# auto-seed identitas server (P1)\nSERVER_ID=%s\n' "$_MACHINE_ID" >> "$CONF"
+    SERVER_ID="$_MACHINE_ID"
+    echo "INFO: SERVER_ID di-seed ke $CONF ($_MACHINE_ID)" >&2
+fi
+export SERVER_ID="${SERVER_ID:-}"
+export ODIN_MACHINE_ID="$_MACHINE_ID"
+
 # ODIN dijalankan dari ODIN_HOME, BUKAN dari app dir. Alasan (isolasi konteks P0):
 #   - Proses ODIN tak boleh mewarisi konteks project. FastMCP/pydantic-settings
 #     otomatis membaca ./.env dari CWD; app dir (mis. /var/www/<proj>) kerap punya

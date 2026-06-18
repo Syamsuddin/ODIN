@@ -458,5 +458,41 @@ class TestWebRootNote(unittest.TestCase):
         self.assertIn("document root", ins)
 
 
+# ===========================================================================
+# P1 — verifikasi identitas server (anti mis-route)
+# ===========================================================================
+class TestServerIdentity(unittest.TestCase):
+
+    def test_read_machine_id_returns_str(self):
+        self.assertIsInstance(da._read_machine_id(), str)
+
+    def test_skip_when_no_server_id(self):
+        # SERVER_ID kosong (server lama / belum di-seed) → lewati, tidak exit
+        with patch.dict(da.os.environ, {"SERVER_ID": "", "ODIN_MACHINE_ID": "abc"}, clear=False):
+            da._assert_server_identity()
+
+    def test_pass_when_match(self):
+        with patch.dict(da.os.environ, {"SERVER_ID": "abc123", "ODIN_MACHINE_ID": "abc123"}, clear=False):
+            da._assert_server_identity()
+
+    def test_exit_when_mismatch(self):
+        with patch.dict(da.os.environ, {"SERVER_ID": "server-A", "ODIN_MACHINE_ID": "server-B"}, clear=False):
+            with self.assertRaises(SystemExit) as cm:
+                da._assert_server_identity()
+            self.assertEqual(cm.exception.code, 1)
+
+    def test_skip_when_machine_id_unreadable(self):
+        # SERVER_ID diset tapi machine-id tak terbaca → WARN + lewati (jangan brick)
+        with patch.dict(da.os.environ, {"SERVER_ID": "expected", "ODIN_MACHINE_ID": ""}, clear=False), \
+             patch.object(da, "_read_machine_id", return_value=""):
+            da._assert_server_identity()
+
+    def test_fallback_read_machine_id_match(self):
+        # ODIN_MACHINE_ID kosong tapi _read_machine_id cocok → tidak exit
+        with patch.dict(da.os.environ, {"SERVER_ID": "xyz", "ODIN_MACHINE_ID": ""}, clear=False), \
+             patch.object(da, "_read_machine_id", return_value="xyz"):
+            da._assert_server_identity()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -2141,6 +2141,47 @@ def _seed_web_root_note() -> None:
         log.debug("seed web-root note gagal", exc_info=True)
 
 
+def _read_machine_id() -> str:
+    """ID unik & stabil mesin Linux. /etc/machine-id utama; dbus sbg fallback."""
+    for p in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+        try:
+            with open(p) as f:
+                v = f.read().strip()
+                if v:
+                    return v
+        except OSError:
+            continue
+    return ""
+
+
+def _assert_server_identity() -> None:
+    """P1 — anti mis-route. SERVER_ID di-bind ke conf project (oleh run.sh saat
+    pertama jalan) = machine-id server yang benar. Bila proses ini jalan di mesin
+    dengan machine-id BERBEDA, hampir pasti koneksi MCP nyasar ke server salah
+    (mis. ~/.ssh/config bocor / .mcp.json keliru) → tolak LOUD sebelum melayani
+    tool apa pun. Opt-in & backward-compatible: bila SERVER_ID belum di-set
+    (server lama yang belum di-seed) verifikasi dilewati."""
+    expected = os.environ.get("SERVER_ID", "").strip()
+    if not expected:
+        return  # belum di-bind → lewati (kompatibel mundur)
+    actual = os.environ.get("ODIN_MACHINE_ID", "").strip() or _read_machine_id()
+    if not actual:
+        log.warning("SERVER_ID diset tapi machine-id tak terbaca — verifikasi identitas dilewati")
+        return
+    if actual != expected:
+        msg = (f"FATAL: SERVER MISMATCH — conf project '{PROJECT_NAME or '?'}' terikat ke "
+               f"server {expected[:12]}… tetapi mesin ini {actual[:12]}…. Kemungkinan "
+               f"MIS-ROUTE (cek ~/.ssh/config / .mcp.json). ODIN menolak jalan.")
+        log.error(msg)
+        print(msg, file=sys.stderr)
+        sys.exit(1)
+    log.info("Identitas server terverifikasi (machine-id %s…)", actual[:12])
+
+
+# Verifikasi identitas server PALING AWAL — gagal cepat sebelum inspeksi/FastMCP.
+_assert_server_identity()
+
+
 # Inspeksi saat startup (lewati jika ODIN_SKIP_INSPECT=1, mis. saat testing)
 if os.environ.get("ODIN_SKIP_INSPECT", "").strip() in ("1", "true", "yes"):
     log.info("ODIN_SKIP_INSPECT=1 — inspeksi dilewati")
