@@ -461,3 +461,134 @@ class TestRunShProjectName:
         )
         assert result.returncode == 0
         assert "PROJECT_NAME=simuru" in result.stdout
+
+
+# ── Validasi remote_root (anti shell-injection) ─────────────────────────────
+
+class TestValidateRemoteRoot:
+    def test_accepts_absolute_safe(self):
+        assert odin_cli._validate_remote_root("/var/www/foo")
+        assert odin_cli._validate_remote_root("/srv/app-1.0/public")
+
+    def test_rejects_relative_and_injection(self):
+        assert not odin_cli._validate_remote_root("var/www")
+        assert not odin_cli._validate_remote_root("/var/www; rm -rf /")
+        assert not odin_cli._validate_remote_root("/var/$(id)")
+        assert not odin_cli._validate_remote_root("/var/`whoami`")
+
+
+# ── Drift .mcp.json: migrasi & deteksi dua-lokasi ───────────────────────────
+
+class TestMcpJsonMigration:
+    def test_write_migrates_legacy_mcp_json(self, tmp_path):
+        wd = tmp_path / "PROJ"
+        wd.mkdir()
+        (wd / ".mcp.json").write_text(json.dumps({"mcpServers": {
+            "odin": {"command": "ssh", "args": ["old"]},
+            "other": {"command": "x"},
+        }}))
+        path = odin_cli._write_local_mcp_config(str(wd), "srv1", "proj")
+        settings = json.loads(path.read_text())
+        assert settings["mcpServers"]["odin"]["args"] == [
+            "srv1", "/home/odin/run.sh", "--project", "proj"]
+        # odin dipindah dari .mcp.json, server lain dipertahankan
+        mcp = json.loads((wd / ".mcp.json").read_text())
+        assert "odin" not in mcp["mcpServers"]
+        assert "other" in mcp["mcpServers"]
+
+    def test_mcp_json_deleted_when_only_odin(self, tmp_path):
+        wd = tmp_path / "PROJ2"
+        wd.mkdir()
+        (wd / ".mcp.json").write_text(json.dumps({"mcpServers": {"odin": {"command": "ssh"}}}))
+        odin_cli._write_local_mcp_config(str(wd), "srv", "p2")
+        assert not (wd / ".mcp.json").exists()
+
+    def test_has_odin_mcp_detects_both_locations(self, tmp_path):
+        wd = tmp_path / "A"
+        (wd / ".claude").mkdir(parents=True)
+        (wd / ".claude" / "settings.json").write_text(
+            json.dumps({"mcpServers": {"odin": {"command": "ssh"}}}))
+        assert odin_cli._has_odin_mcp(str(wd)) == (True, ".claude/settings.json")
+
+        wd2 = tmp_path / "B"
+        wd2.mkdir()
+        (wd2 / ".mcp.json").write_text(json.dumps({"mcpServers": {"odin": {"command": "ssh"}}}))
+        assert odin_cli._has_odin_mcp(str(wd2)) == (True, ".mcp.json")
+
+        wd3 = tmp_path / "C"
+        wd3.mkdir()
+        assert odin_cli._has_odin_mcp(str(wd3)) == (False, "")
+
+    def test_remove_cleans_both(self, tmp_path):
+        wd = tmp_path / "PROJ"
+        wd.mkdir()
+        (wd / ".mcp.json").write_text(json.dumps({"mcpServers": {
+            "odin": {"command": "ssh"}, "other": {"command": "x"}}}))
+        odin_cli._write_local_mcp_config(str(wd), "srv", "proj")  # migrasi
+        odin_cli._remove_local_mcp_config(str(wd))
+        settings = json.loads((wd / ".claude" / "settings.json").read_text())
+        assert "odin" not in settings.get("mcpServers", {})
+
+
+# ── Non-interaktif project add (flags) ──────────────────────────────────────
+
+class TestProjectAddNonInteractive:
+    def test_flags_generate_config_without_prompts(self, tmp_path):
+        from types import SimpleNamespace
+        _setup_dirs(tmp_path)
+        workdir = tmp_path / "FOO"
+        workdir.mkdir()
+        mock_paramiko = MagicMock()
+        with _patch_dirs(tmp_path), patch.object(odin_cli, "paramiko", mock_paramiko):
+            odin_cli.save_server("gibtha_srv", {
+                "name": "gibtha_srv", "host": "1.2.3.4", "port": 2409,
+                "key": str(tmp_path / "keys" / "gibtha_srv"),
+            })
+            args = SimpleNamespace(name="foo", server="gibtha_srv",
+                                   remote_root="/var/www/foo",
+                                   workdir=str(workdir), yes=True)
+            with patch.object(odin_cli.SSHSession, "connect"), \
+                 patch.object(odin_cli.SSHSession, "run", return_value=("", "", 0)), \
+                 patch.object(odin_cli.SSHSession, "close"), \
+                 patch.object(odin_cli, "ask_input",
+                              side_effect=AssertionError("tidak boleh prompt di mode --yes")):
+                odin_cli.cmd_project_add(args)
+            settings = json.loads((workdir / ".claude" / "settings.json").read_text())
+            assert settings["mcpServers"]["odin"]["args"] == [
+                "gibtha_srv", "/home/odin/run.sh", "--project", "foo"]
+            assert odin_cli.load_project("foo")["server"] == "gibtha_srv"
+
+    def test_rejects_invalid_remote_root(self, tmp_path):
+        from types import SimpleNamespace
+        _setup_dirs(tmp_path)
+        with _patch_dirs(tmp_path):
+            odin_cli.save_server("srv", {"name": "srv", "host": "1.2.3.4",
+                                         "port": 22, "key": ""})
+            args = SimpleNamespace(name="bad", server="srv",
+                                   remote_root="/var/www; rm -rf /",
+                                   workdir=str(tmp_path), yes=True)
+            # ditolak sebelum SSH → tak ada project tersimpan
+            odin_cli.cmd_project_add(args)
+            assert "bad" not in odin_cli.list_projects()
+
+
+# ── odin project sync ───────────────────────────────────────────────────────
+
+class TestProjectSync:
+    def test_sync_regenerates_local_config(self, tmp_path):
+        _setup_dirs(tmp_path)
+        workdir = tmp_path / "SYNCME"
+        workdir.mkdir()
+        with _patch_dirs(tmp_path):
+            odin_cli.save_server("srv", {"name": "srv", "host": "1.2.3.4",
+                                         "port": 22, "key": ""})
+            odin_cli.save_project("syncme", {
+                "name": "syncme", "server": "srv",
+                "remote_root": "/var/www/syncme",
+                "local_workdir": str(workdir)})
+            # config lokal belum ada → sync membuatnya dari manifest
+            assert not (workdir / ".claude" / "settings.json").exists()
+            odin_cli.cmd_project_sync("syncme")
+            settings = json.loads((workdir / ".claude" / "settings.json").read_text())
+            assert settings["mcpServers"]["odin"]["args"] == [
+                "srv", "/home/odin/run.sh", "--project", "syncme"]

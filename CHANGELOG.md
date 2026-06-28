@@ -4,6 +4,40 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ---
 
+## [Unreleased]
+
+### Added — Kemudahan Multi-Project (CLI)
+
+**`odin project add` — mode non-interaktif (flags):**
+- Flag baru: `--name`, `--server`, `--remote-root`, `--workdir`, dan `-y/--yes`.
+- Memungkinkan registrasi batch / scripting tanpa prompt, mis.:
+  ```sh
+  odin project add --name ekampus --server gibtha_srv \
+      --remote-root /var/www/ekampus --workdir ~/PROJECTS/eKAMPUS --yes
+  ```
+- Tanpa `--yes` tetap interaktif; flag yang diisi melewati prompt terkait. Di mode `--yes`, field wajib yang kosong gagal jelas (exit code 2) alih-alih menggantung.
+
+**`odin project sync` — perintah baru:**
+- `odin project sync [name] [--all]` meregenerasi config lokal (`.claude/settings.json`) dari manifest `~/.odin/projects/*.yaml`.
+- Pemulihan satu-perintah saat `settings.json` terhapus, atau saat **repo ODIN dipindah** (guard-path absolut di hook diperbarui otomatis).
+
+### Changed
+
+- **Satu sumber kebenaran config lokal: `.claude/settings.json`.** `project add` & `sync` kini **memigrasikan** entry `odin` dari `.mcp.json` format lama (server MCP lain dipertahankan; file dihapus bila kosong) → tidak ada lagi definisi MCP ganda/drift.
+- `project remove` membersihkan entry `odin` di **kedua** lokasi (`.claude/settings.json` + `.mcp.json`) → tidak ada entry yatim.
+- `project status` mendeteksi entry MCP `odin` di kedua lokasi (tak lagi false-FAIL untuk project format lama) dan menampilkan sumbernya.
+- CLI version diselaraskan ke **2.1.0** (sebelumnya keliru `2.0.0`); `odin --version` membaca versi dari agent.
+
+### Security
+
+- `remote-root` divalidasi (harus path absolut tanpa karakter shell) dan di-`shlex.quote` saat dikirim ke server → menutup celah command-injection lewat path project.
+
+### Tests
+
+- +9 unit test (validasi remote_root, migrasi/deteksi `.mcp.json`, `project add` non-interaktif, `project sync`). Total suite: **690 passed, 1 skipped**.
+
+---
+
 ## [2.0.0] — 2026-06-15
 
 ### Added — Multi-Project Support & Project Awareness

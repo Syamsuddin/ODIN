@@ -9,7 +9,7 @@
 
 <p align="center">
   <a href="#"><img src="https://img.shields.io/badge/MCP_Tools-20-00bcd4?style=flat-square&logo=lightning&logoColor=white" alt="20 MCP Tools"/></a>
-  <a href="#"><img src="https://img.shields.io/badge/CLI_Commands-11-4caf50?style=flat-square&logo=terminal&logoColor=white" alt="11 CLI Commands"/></a>
+  <a href="#"><img src="https://img.shields.io/badge/CLI_Commands-12-4caf50?style=flat-square&logo=terminal&logoColor=white" alt="12 CLI Commands"/></a>
   <a href="#"><img src="https://img.shields.io/badge/Security-4_Layers-e53935?style=flat-square&logo=shield&logoColor=white" alt="4 Security Layers"/></a>
   <a href="#"><img src="https://img.shields.io/badge/Risk_Tiers-5-ff9800?style=flat-square&logo=alert&logoColor=white" alt="5 Risk Tiers"/></a>
   <a href="#"><img src="https://img.shields.io/badge/Tests-664-9c27b0?style=flat-square&logo=pytest&logoColor=white" alt="664 Tests"/></a>
@@ -52,7 +52,7 @@ LAPTOP (Claude Code CLI)                    SERVER(S) (VPS, user: odin)
 │  odin_cli.py            │  SSH stdio MCP  │  odin_agent.py (shared)        │
 │  ├─ server add/list/rm  │ ──────────────▶ │  run.sh --project <name>       │
 │  ├─ project add/list/rm │  per project    │  projects/<name>.conf          │
-│  ├─ project status      │                 │  memory/<name>/ (isolated)     │
+│  ├─ project status/sync │                 │  memory/<name>/ (isolated)     │
 │  ├─ project switch      │                 │                                │
 │  └─ update / doctor     │                 │  17 MCP tools                  │
 │                         │                 │  Output intelligence (23)      │
@@ -87,7 +87,7 @@ ODIN/
 │   │                        # + Orchestrator + Continuous Learning + Cortex
 │   └── run.sh               # Multi-project launcher: --project <name>
 ├── client/
-│   ├── odin_cli.py          # CLI multi-server & multi-project (985 baris)
+│   ├── odin_cli.py          # CLI multi-server & multi-project (1149 baris)
 │   ├── odin_guard.py        # Risk engine + guard (720 baris) — project-aware
 │   └── update_checker.py    # Cek versi terbaru (155 baris)
 ├── tests/                   # 664 tests across 15 files
@@ -214,13 +214,24 @@ ODIN sekarang **tahu dan tampilkan** project aktif di mana-mana:
 | `odin server list` | Daftar server terdaftar |
 | `odin server remove <alias>` | Hapus server |
 | `odin server test <alias>` | Test koneksi + ODIN health |
-| `odin project add` | Link workdir lokal ↔ server:project |
+| `odin project add` | Link workdir lokal ↔ server:project (interaktif **atau** via flags) |
 | `odin project list` | Daftar project terdaftar (dengan marker `→` untuk project aktif) |
-| `odin project status [name]` | **Baru** — Validasi project: config lokal + SSH ping server |
-| `odin project switch <name>` | **Baru** — Buka tab Terminal baru di workdir project |
-| `odin project remove <name>` | Hapus project config |
+| `odin project status [name]` | Validasi project: config lokal + SSH ping server |
+| `odin project switch <name>` | Buka tab Terminal baru di workdir project |
+| `odin project sync [name] [--all]` | **Baru** — Regenerasi config lokal dari manifest (pemulihan / migrasi) |
+| `odin project remove <name>` | Hapus project config (bersihkan `.claude/settings.json` + `.mcp.json`) |
 | `odin update <alias>` | Update odin_agent.py + run.sh di server |
 | `odin doctor <alias>` | Diagnostik server lengkap |
+
+**Registrasi non-interaktif (batch/scripting):**
+
+```sh
+odin project add --name ekampus --server gibtha_srv \
+    --remote-root /var/www/ekampus --workdir ~/PROJECTS/eKAMPUS --yes
+```
+
+> Config lokal kanonik adalah `.claude/settings.json`. `project add`/`sync` otomatis
+> memigrasikan entry `odin` dari `.mcp.json` format lama agar tidak ada definisi MCP ganda.
 
 ### Alur Kerja
 
@@ -480,8 +491,11 @@ Installer menangani:
 # 1. Setup server (1x per server)
 odin server add
 
-# 2. Tambah project (1x per project)
+# 2. Tambah project (1x per project) — interaktif
 odin project add
+#    ...atau non-interaktif (batch):
+#    odin project add --name simuru --server vps-app \
+#        --remote-root /var/www/simuru --workdir ~/PROJECTS/SIMURU --yes
 
 # 3. Mulai bekerja
 cd ~/PROJECTS/SIMURU && claude
@@ -494,6 +508,9 @@ odin project status
 
 # 6. Switch ke project lain
 odin project switch <name>
+
+# 7. Regenerasi config lokal (mis. setelah repo ODIN dipindah)
+odin project sync --all
 ```
 
 ### Uninstall
@@ -597,9 +614,9 @@ Auto-detect juga mendukung: PostgreSQL, MongoDB, Docker, Apache, Redis, Supervis
 
 | Metrik | Nilai |
 |--------|-------|
-| Total kode | **~4765 baris** (server 2905 + guard 720 + cli 985 + updater 155) |
-| Total test | **~4800 baris** (664 automated tests, 15 files) |
-| CLI commands | 11 (termasuk `project status` & `switch`) |
+| Total kode | **~4929 baris** (server 2905 + guard 720 + cli 1149 + updater 155) |
+| Total test | **690 automated tests, 15 files** |
+| CLI commands | 12 (termasuk `project status`, `switch` & `sync`) |
 | Dependensi server | 1 (`mcp[cli]`) |
 | Dependensi laptop CLI | 2 (`paramiko`, `pyyaml`) |
 | MCP tools | **20** (termasuk cortex_log, cortex_events, memory_health) |

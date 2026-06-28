@@ -4,19 +4,25 @@ ODIN v2.0 — CLI untuk manajemen multi-server & multi-project.
 
 Usage:
     odin server add|list|remove|test
-    odin project add|list|remove
+    odin project add|list|status|switch|sync|remove
     odin update <server-alias>
     odin doctor <server-alias>
+
+Non-interaktif (batch):
+    odin project add --name foo --server srv --remote-root /var/www/foo \
+        --workdir ~/PROJECTS/FOO --yes
+    odin project sync --all     # regenerasi config lokal dari manifest
 """
 from __future__ import annotations
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 import argparse
 import getpass
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -158,6 +164,135 @@ def _detect_current_project() -> str | None:
                 except Exception:
                     continue
     return None
+
+
+# ── Config lokal MCP (satu sumber kebenaran: .claude/settings.json) ─────────
+# Tools read-only yang aman di-auto-allow di workdir project.
+READ_ONLY_TOOLS = [
+    "mcp__odin__server_info", "mcp__odin__tail_log",
+    "mcp__odin__http_health_check", "mcp__odin__memory_recall",
+    "mcp__odin__memory_digest", "mcp__odin__session_history",
+    "mcp__odin__rollback_plan", "mcp__odin__inspect_server",
+    "mcp__odin__audit_tail", "mcp__odin__runbook_templates",
+]
+
+
+def _validate_remote_root(path: str) -> bool:
+    """Path remote harus absolut & hanya karakter aman (anti shell-injection)."""
+    return bool(re.match(r"^/[A-Za-z0-9._/-]*$", path))
+
+
+def _odin_mcp_entry(server_alias: str, name: str) -> dict:
+    # -q: suppress SSH client warnings/banners to keep stdio clean for JSON-RPC
+    # -T: disable pseudo-TTY so sshd won't print MOTD/PrintMotd to stdout
+    return {
+        "type": "stdio",
+        "command": "ssh",
+        "args": ["-q", "-T", server_alias, "/home/odin/run.sh", "--project", name],
+    }
+
+
+def _guard_path() -> str:
+    return str(ODIN_INSTALL_DIR / "client" / "odin_guard.py")
+
+
+def _strip_odin_from_mcp_json(workdir: str) -> bool:
+    """Buang entry 'odin' dari .mcp.json (format lama) agar tak ada definisi ganda.
+    Hapus file bila jadi kosong. Return True bila ada perubahan."""
+    mcp_path = Path(workdir) / ".mcp.json"
+    if not mcp_path.exists():
+        return False
+    try:
+        data = json.loads(mcp_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return False
+    servers = data.get("mcpServers", {})
+    if "odin" not in servers:
+        return False
+    servers.pop("odin", None)
+    if not servers:
+        data.pop("mcpServers", None)
+    try:
+        if not data:
+            mcp_path.unlink()
+        else:
+            mcp_path.write_text(json.dumps(data, indent=2) + "\n")
+    except OSError:
+        return False
+    return True
+
+
+def _write_local_mcp_config(workdir: str, server_alias: str, name: str) -> Path:
+    """Tulis .claude/settings.json kanonik (entry odin + hooks guard + allow read-only).
+    Sekaligus migrasi: buang odin dari .mcp.json lama bila ada (anti-drift)."""
+    claude_dir = Path(workdir) / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    settings_path = claude_dir / "settings.json"
+
+    settings: dict = {}
+    if settings_path.exists():
+        try:
+            settings = json.loads(settings_path.read_text())
+        except json.JSONDecodeError:
+            settings = {}
+
+    settings.setdefault("mcpServers", {})["odin"] = _odin_mcp_entry(server_alias, name)
+
+    guard = _guard_path()
+    settings.setdefault("hooks", {})
+    settings["hooks"]["PreToolUse"] = [{
+        "matcher": "mcp__odin__(run_command|service_action|laravel_deploy|run_tests|runbook|inspect_server|memory_write|memory_forget)",
+        "hooks": [{"type": "command", "command": f"python3 '{guard}'", "timeout": 10}],
+    }]
+    settings["hooks"]["PostToolUse"] = [{
+        "matcher": "mcp__odin__inspect_server",
+        "hooks": [{"type": "command", "command": f"python3 '{guard}'", "timeout": 10}],
+    }]
+
+    allow_list = settings.setdefault("permissions", {}).setdefault("allow", [])
+    for tool in READ_ONLY_TOOLS:
+        if tool not in allow_list:
+            allow_list.append(tool)
+
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+    _strip_odin_from_mcp_json(workdir)
+    return settings_path
+
+
+def _remove_local_mcp_config(workdir: str) -> None:
+    """Hapus entry odin dari kedua lokasi (.claude/settings.json & .mcp.json)."""
+    settings_path = Path(workdir) / ".claude" / "settings.json"
+    if settings_path.exists():
+        try:
+            settings = json.loads(settings_path.read_text())
+            (settings.get("mcpServers") or {}).pop("odin", None)
+            if not settings.get("mcpServers"):
+                settings.pop("mcpServers", None)
+            if settings:
+                settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+            else:
+                settings_path.unlink()
+                claude_dir = settings_path.parent
+                if claude_dir.exists() and not any(claude_dir.iterdir()):
+                    claude_dir.rmdir()
+        except (json.JSONDecodeError, OSError):
+            pass
+    _strip_odin_from_mcp_json(workdir)
+
+
+def _has_odin_mcp(workdir: str) -> tuple[bool, str]:
+    """True bila workdir punya entry MCP odin di settings.json ATAU .mcp.json."""
+    base = Path(workdir)
+    for label, p in ((".claude/settings.json", base / ".claude" / "settings.json"),
+                     (".mcp.json", base / ".mcp.json")):
+        if p.exists():
+            try:
+                d = json.loads(p.read_text())
+                if "odin" in (d.get("mcpServers") or {}):
+                    return True, label
+            except (json.JSONDecodeError, OSError):
+                continue
+    return False, ""
 
 
 def get_odin_version() -> str:
@@ -309,7 +444,11 @@ def cmd_server_add() -> None:
     _, _, rc = ssh.run("/home/odin/.venv/bin/python -c 'import mcp' 2>/dev/null")
     if rc != 0:
         info("  Menginstall venv + mcp[cli] (bisa 1-2 menit)...")
-        ssh.run(f"{pp}su - odin -c 'python3 -m venv /home/odin/.venv'")
+        # Ubuntu/Debian: `python3 -m venv` butuh paket python3-venv (ensurepip).
+        # Tanpa ini venv terbentuk tanpa pip → "pip: No such file or directory".
+        ssh.run(f"{pp}DEBIAN_FRONTEND=noninteractive apt-get update -qq", timeout=180)
+        ssh.run(f"{pp}DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv python3-pip", timeout=180)
+        ssh.run(f"{pp}su - odin -c 'rm -rf /home/odin/.venv && python3 -m venv /home/odin/.venv'")
         out, errs, rc = ssh.run(
             f"{pp}su - odin -c '/home/odin/.venv/bin/pip install --quiet \"mcp[cli]\"'",
             timeout=180
@@ -377,7 +516,7 @@ def cmd_server_add() -> None:
     ssh_config.parent.mkdir(mode=0o700, exist_ok=True)
     existing = ssh_config.read_text() if ssh_config.exists() else ""
     if f"Host {alias}" not in existing:
-        entry = f"\nHost {alias}\n    HostName {host}\n    Port {port}\n    User odin\n    IdentityFile {key_path}\n    StrictHostKeyChecking accept-new\n"
+        entry = f"\nHost {alias}\n    HostName {host}\n    Port {port}\n    User odin\n    IdentityFile {key_path}\n    StrictHostKeyChecking accept-new\n    RequestTTY no\n    LogLevel QUIET\n"
         with open(ssh_config, "a") as f:
             f.write(entry)
         ok(f"~/.ssh/config — entry '{alias}' ditambahkan")
@@ -401,16 +540,31 @@ def cmd_server_add() -> None:
 
 
 # ── odin project add ────────────────────────────────────────────────────────
-def cmd_project_add() -> None:
+def cmd_project_add(args=None) -> None:
     ensure_dirs()
     servers = list_servers()
     if not servers:
         err("Belum ada server. Jalankan 'odin server add' dulu.")
         return
 
+    # Mode non-interaktif aktif bila --yes diberikan (pakai default & lewati prompt).
+    auto = bool(getattr(args, "yes", False))
+
+    def resolve(value, prompt_fn, flag_label, *, default=None):
+        if value:
+            return value
+        if auto:
+            if default is not None:
+                return default
+            err(f"--{flag_label} wajib dalam mode non-interaktif.")
+            sys.exit(2)
+        return prompt_fn()
+
     banner("ODIN — Tambah Project")
 
-    name = ask_input("Nama project")
+    # ── Nama ──
+    name = resolve(getattr(args, "name", None),
+                   lambda: ask_input("Nama project"), "name")
     if re.search(r"[^a-zA-Z0-9_-]", name):
         err("Nama project hanya boleh huruf, angka, - dan _")
         return
@@ -418,16 +572,34 @@ def cmd_project_add() -> None:
         err(f"Project '{name}' sudah ada.")
         return
 
-    if len(servers) == 1:
+    # ── Server ──
+    server_alias = getattr(args, "server", None)
+    if server_alias:
+        if server_alias not in servers:
+            err(f"Server '{server_alias}' tidak terdaftar. Tersedia: {', '.join(servers)}")
+            return
+    elif len(servers) == 1:
         server_alias = servers[0]
         info(f"Server: {server_alias} (satu-satunya)")
+    elif auto:
+        err(f"--server wajib (ada >1 server: {', '.join(servers)}).")
+        sys.exit(2)
     else:
         idx = ask_choice("Pilih server", servers)
         server_alias = servers[idx - 1]
 
-    remote_root = ask_input("Path di server", default=f"/var/www/{name}")
-    local_workdir = ask_input("Workdir lokal", default=str(Path.cwd()))
-    local_workdir = str(Path(local_workdir).expanduser().resolve())
+    # ── Remote root & workdir ──
+    remote_root = resolve(getattr(args, "remote_root", None),
+                          lambda: ask_input("Path di server", default=f"/var/www/{name}"),
+                          "remote-root", default=f"/var/www/{name}")
+    if not _validate_remote_root(remote_root):
+        err(f"Path remote tidak valid: {remote_root!r} (harus absolut & tanpa karakter aneh).")
+        return
+
+    workdir = resolve(getattr(args, "workdir", None),
+                      lambda: ask_input("Workdir lokal", default=str(Path.cwd())),
+                      "workdir", default=str(Path.cwd()))
+    local_workdir = str(Path(workdir).expanduser().resolve())
     print()
 
     server = load_server(server_alias)
@@ -443,14 +615,14 @@ def cmd_project_add() -> None:
         return
 
     # [1] Validasi path remote ada
-    _, _, rc = ssh.run(f"test -d {remote_root}")
+    _, _, rc = ssh.run(f"test -d {shlex.quote(remote_root)}")
     if rc != 0:
         warn(f"{remote_root} tidak ditemukan di server.")
-        if not confirm("Lanjutkan tanpa validasi?"):
+        if not (auto or confirm("Lanjutkan tanpa validasi?")):
             ssh.close()
             return
 
-    # [2] Buat project conf di server
+    # [2] Buat project conf di server (remote_root sudah tervalidasi aman)
     conf_lines = [
         f"PROJECT_NAME={name}",
         f"PROJECT_ROOT={remote_root}",
@@ -466,57 +638,8 @@ def cmd_project_add() -> None:
 
     ssh.close()
 
-    # [4] Tulis .claude/settings.json di workdir lokal
-    claude_dir = Path(local_workdir) / ".claude"
-    claude_dir.mkdir(parents=True, exist_ok=True)
-    settings_path = claude_dir / "settings.json"
-
-    settings: dict = {}
-    if settings_path.exists():
-        try:
-            settings = json.loads(settings_path.read_text())
-        except json.JSONDecodeError:
-            settings = {}
-
-    settings.setdefault("mcpServers", {})["odin"] = {
-        "type": "stdio",
-        "command": "ssh",
-        "args": [server_alias, "/home/odin/run.sh", "--project", name],
-    }
-
-    guard_path = str(ODIN_INSTALL_DIR / "client" / "odin_guard.py")
-
-    settings.setdefault("hooks", {})
-    settings["hooks"]["PreToolUse"] = [{
-        "matcher": "mcp__odin__(run_command|service_action|laravel_deploy|run_tests|runbook|inspect_server|memory_write|memory_forget)",
-        "hooks": [{
-            "type": "command",
-            "command": f"python3 '{guard_path}'",
-            "timeout": 10,
-        }],
-    }]
-    settings["hooks"]["PostToolUse"] = [{
-        "matcher": "mcp__odin__inspect_server",
-        "hooks": [{
-            "type": "command",
-            "command": f"python3 '{guard_path}'",
-            "timeout": 10,
-        }],
-    }]
-
-    read_only_tools = [
-        "mcp__odin__server_info", "mcp__odin__tail_log",
-        "mcp__odin__http_health_check", "mcp__odin__memory_recall",
-        "mcp__odin__memory_digest", "mcp__odin__session_history",
-        "mcp__odin__rollback_plan", "mcp__odin__inspect_server",
-        "mcp__odin__audit_tail", "mcp__odin__runbook_templates",
-    ]
-    allow_list = settings.setdefault("permissions", {}).setdefault("allow", [])
-    for tool in read_only_tools:
-        if tool not in allow_list:
-            allow_list.append(tool)
-
-    settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+    # [4] Tulis config lokal kanonik (+ migrasi .mcp.json lama)
+    settings_path = _write_local_mcp_config(local_workdir, server_alias, name)
     progress(3, 3, f"Workdir config: {settings_path}")
 
     # [5] Tulis ~/.odin/projects/<name>.yaml
@@ -635,7 +758,7 @@ def cmd_server_test(alias: str) -> None:
     checks = [
         ("odin_agent.py", "test -f /home/odin/odin_agent.py && echo OK"),
         ("run.sh executable", "test -x /home/odin/run.sh && echo OK"),
-        ("mcp module", "/home/odin/.venv/bin/python -c 'import mcp; print(mcp.__version__)' 2>&1"),
+        ("mcp module", "/home/odin/.venv/bin/python -c 'from mcp.server.fastmcp import FastMCP; print(\"OK\")' 2>&1"),
         ("projects/ dir", "test -d /home/odin/projects && echo OK"),
         ("memory/ dir", "test -d /home/odin/memory && echo OK"),
     ]
@@ -717,18 +840,14 @@ def cmd_project_status(name: str | None = None) -> None:
     print(f"  {'Dibuat':<16}: {d.get('created', '?')}")
     print()
 
+    has_mcp, mcp_src = _has_odin_mcp(workdir) if workdir else (False, "")
     checks = [
         ("Project YAML",
          (PROJECTS_DIR / f"{name}.yaml").exists() or (PROJECTS_DIR / f"{name}.json").exists()),
         ("Workdir ada", Path(workdir).is_dir() if workdir else False),
         ("settings.json", settings_path.exists() if settings_path else False),
+        (f"MCP config odin{f' ({mcp_src})' if mcp_src else ''}", has_mcp),
     ]
-    if settings_path and settings_path.exists():
-        try:
-            s = json.loads(settings_path.read_text())
-            checks.append(("MCP config odin", "odin" in s.get("mcpServers", {})))
-        except Exception:
-            checks.append(("MCP config odin", False))
 
     for label, ok_val in checks:
         status = _c("0;32", "OK") if ok_val else _c("0;31", "FAIL")
@@ -793,28 +912,58 @@ def cmd_project_remove(name: str) -> None:
     if not confirm(f"Hapus project '{name}' ({project.get('server', '?')}:{project.get('remote_root', '?')})?"):
         return
     path.unlink()
-    # Hapus MCP entry di .claude/settings.json workdir
+    # Hapus MCP entry di kedua lokasi (.claude/settings.json & .mcp.json)
     workdir = project.get("local_workdir", "")
     if workdir:
-        settings_path = Path(workdir) / ".claude" / "settings.json"
-        if settings_path.exists():
-            try:
-                settings = json.loads(settings_path.read_text())
-                settings.get("mcpServers", {}).pop("odin", None)
-                if settings.get("mcpServers") or settings.get("hooks") or settings.get("permissions"):
-                    settings_path.write_text(json.dumps(settings, indent=2) + "\n")
-                else:
-                    settings_path.unlink()
-                    claude_dir = settings_path.parent
-                    if claude_dir.exists() and not any(claude_dir.iterdir()):
-                        claude_dir.rmdir()
-            except (json.JSONDecodeError, OSError):
-                pass
+        _remove_local_mcp_config(workdir)
     # Hapus mode file
     mode_file = MODES_DIR / name
     if mode_file.exists():
         mode_file.unlink()
     ok(f"Project '{name}' dihapus. Memory di server tetap utuh.")
+
+
+# ── odin project sync ───────────────────────────────────────────────────────
+def cmd_project_sync(name: str | None = None, sync_all: bool = False) -> None:
+    """Regenerasi config lokal (.claude/settings.json) dari manifest YAML.
+    Berguna saat settings terhapus, guard-path berubah (repo ODIN dipindah),
+    atau migrasi .mcp.json lama ke format kanonik."""
+    ensure_dirs()
+    if sync_all:
+        names = list_projects()
+    else:
+        target = name or _detect_current_project()
+        if not target:
+            err("Tidak bisa menentukan project (cwd tak cocok project manapun).")
+            info("Sebutkan nama: odin project sync <name>  — atau  odin project sync --all")
+            return
+        names = [target]
+
+    if not names:
+        info("Belum ada project terdaftar.")
+        return
+
+    banner("ODIN — Sync Config Lokal")
+    synced = 0
+    for nm in names:
+        if nm not in list_projects():
+            err(f"{nm}: tidak terdaftar — dilewati")
+            continue
+        d = load_project(nm)
+        workdir = d.get("local_workdir", "")
+        server_alias = d.get("server", "")
+        if not workdir or not Path(workdir).is_dir():
+            warn(f"{nm}: workdir '{workdir}' tak ada — dilewati")
+            continue
+        if server_alias not in list_servers():
+            warn(f"{nm}: server '{server_alias}' tak terdaftar — dilewati")
+            continue
+        path = _write_local_mcp_config(workdir, server_alias, nm)
+        ok(f"{nm} → {server_alias}: {path}")
+        synced += 1
+
+    print()
+    info(f"Selesai: {synced}/{len(names)} project ter-sync.")
 
 
 # ── odin update ─────────────────────────────────────────────────────────────
@@ -920,7 +1069,7 @@ def main() -> None:
         prog="odin",
         description="ODIN — CLI untuk manajemen multi-server & multi-project",
     )
-    parser.add_argument("--version", action="version", version=f"ODIN CLI v{__version__}")
+    parser.add_argument("--version", action="version", version=f"ODIN CLI v{get_odin_version()}")
     sub = parser.add_subparsers(dest="command")
 
     # server
@@ -936,8 +1085,17 @@ def main() -> None:
     # project
     proj_p = sub.add_parser("project", help="Kelola project")
     proj_sub = proj_p.add_subparsers(dest="action")
-    proj_sub.add_parser("add", help="Tambah project baru (interaktif)")
+    padd_p = proj_sub.add_parser("add", help="Tambah project baru (interaktif / via flags)")
+    padd_p.add_argument("--name", help="Nama project (slug)")
+    padd_p.add_argument("--server", help="Alias server tujuan")
+    padd_p.add_argument("--remote-root", dest="remote_root", help="Path app di server (mis. /var/www/foo)")
+    padd_p.add_argument("--workdir", help="Workdir lokal (default: cwd)")
+    padd_p.add_argument("-y", "--yes", action="store_true",
+                        help="Non-interaktif: pakai default & lewati konfirmasi")
     proj_sub.add_parser("list", help="Daftar project terdaftar")
+    psync_p = proj_sub.add_parser("sync", help="Regenerasi config lokal dari manifest")
+    psync_p.add_argument("name", nargs="?", help="Nama project (opsional, deteksi dari cwd)")
+    psync_p.add_argument("--all", action="store_true", dest="all", help="Sync semua project")
     pstat_p = proj_sub.add_parser("status", help="Status project (lokal + server)")
     pstat_p.add_argument("name", nargs="?", help="Nama project (opsional, deteksi dari cwd)")
     pswitch_p = proj_sub.add_parser("switch", help="Buka project di tab baru")
@@ -968,9 +1126,11 @@ def main() -> None:
             server_p.print_help()
     elif args.command == "project":
         if args.action == "add":
-            cmd_project_add()
+            cmd_project_add(args)
         elif args.action == "list":
             cmd_project_list()
+        elif args.action == "sync":
+            cmd_project_sync(getattr(args, "name", None), getattr(args, "all", False))
         elif args.action == "status":
             cmd_project_status(getattr(args, "name", None))
         elif args.action == "switch":
