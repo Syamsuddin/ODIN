@@ -6,6 +6,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-06-28
+
+### Added — MCP Global (tersedia otomatis di tiap project)
+
+**`odin global enable [--migrate]` / `odin global disable` — perintah baru:**
+- Memasang ODIN MCP di **scope-user** (`~/.claude/settings.json`) sehingga `mcp__odin__*` muncul **otomatis di setiap project terdaftar** tanpa entry per-repo.
+- Satu entry global memanggil launcher `client/odin_mcp_launch.py` yang **meresolusi project+server dari `cwd` di waktu-spawn** (cocokkan ke `local_workdir`, dukung subdir via longest-prefix). Dir yang bukan project terdaftar ditolak bersih (exit 1) tanpa spawn SSH.
+- Penulisan global **anti-clobber**: hook & permission milik user dipertahankan (hook guard di-merge per-matcher, allow read-only di-dedup).
+- `--migrate` mencabut jejak `odin` per-workdir lama (mcpServers + hook + allow) → global jadi satu-satunya sumber, tanpa definisi/hook ganda.
+- `_detect` (launcher) me-resolve `local_workdir` simbolik agar cocok dengan `cwd` yang ter-resolve.
+
 ### Added — Kemudahan Multi-Project (CLI)
 
 **`odin project add` — mode non-interaktif (flags):**

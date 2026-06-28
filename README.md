@@ -220,6 +220,8 @@ ODIN sekarang **tahu dan tampilkan** project aktif di mana-mana:
 | `odin project switch <name>` | Buka tab Terminal baru di workdir project |
 | `odin project sync [name] [--all]` | **Baru** — Regenerasi config lokal dari manifest (pemulihan / migrasi) |
 | `odin project remove <name>` | Hapus project config (bersihkan `.claude/settings.json` + `.mcp.json`) |
+| `odin global enable [--migrate]` | **Baru** — Pasang MCP odin di scope-user (`~/.claude/settings.json`) → tersedia otomatis di semua project; `--migrate` cabut entry per-workdir lama |
+| `odin global disable` | **Baru** — Cabut entry MCP odin global |
 | `odin update <alias>` | Update odin_agent.py + run.sh di server |
 | `odin doctor <alias>` | Diagnostik server lengkap |
 
@@ -649,7 +651,7 @@ Filosofi: READ auto-approve, WRITE wajib konfirmasi, katastrofik double-brake. G
 
 ## Lisensi & Versi
 
-Versi aktif: **2.1.0** — tersimpan di `__version__` pada kedua file Python.
+Versi aktif: **2.2.0** — tersimpan di `__version__` pada kedua file Python.
 Lihat [CHANGELOG.md](CHANGELOG.md) untuk riwayat perubahan lengkap.
 
-*ODIN v2.1 — multi-server, multi-project, workdir-based. Continuous learning. Orchestrator. Cortex consciousness. Project identity everywhere. Ringan, cerdas, belajar dari pengalaman.*
+*ODIN v2.2 — multi-server, multi-project, workdir-based. Continuous learning. Orchestrator. Cortex consciousness. Project identity everywhere. Ringan, cerdas, belajar dari pengalaman.*

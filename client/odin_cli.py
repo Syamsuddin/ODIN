@@ -15,7 +15,7 @@ Non-interaktif (batch):
 """
 from __future__ import annotations
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 import argparse
 import getpass
@@ -47,6 +47,7 @@ PROJECTS_DIR = ODIN_DIR / "projects"
 KEYS_DIR = ODIN_DIR / "keys"
 MODES_DIR = ODIN_DIR / "modes"
 ODIN_INSTALL_DIR = Path(__file__).resolve().parent.parent
+USER_CLAUDE_DIR = Path.home() / ".claude"   # scope-user: MCP berlaku di SEMUA workdir
 
 # ── Warna ───────────────────────────────────────────────────────────────────
 _NO_COLOR = os.environ.get("NO_COLOR") or not sys.stdout.isatty()
@@ -293,6 +294,143 @@ def _has_odin_mcp(workdir: str) -> tuple[bool, str]:
             except (json.JSONDecodeError, OSError):
                 continue
     return False, ""
+
+
+# ── Config global MCP (scope-user: ~/.claude/settings.json) ─────────────────
+# Satu entry untuk SEMUA project; project+server diresolusi dinamis di waktu-spawn
+# oleh client/odin_mcp_launch.py (cocokkan cwd → local_workdir).
+def _global_mcp_entry() -> dict:
+    launcher = str(ODIN_INSTALL_DIR / "client" / "odin_mcp_launch.py")
+    return {"type": "stdio", "command": "python3", "args": [launcher]}
+
+
+def _ensure_guard_hook(settings: dict, event: str, matcher: str, command: str) -> None:
+    """Sisipkan/replace hook guard tanpa membuang hook lain milik user (anti-clobber).
+    Cocokkan berdasarkan matcher; bila sudah ada → perbarui, bila belum → append."""
+    arr = settings.setdefault("hooks", {}).setdefault(event, [])
+    entry = {"matcher": matcher,
+             "hooks": [{"type": "command", "command": command, "timeout": 10}]}
+    for h in arr:
+        if h.get("matcher") == matcher:
+            h["hooks"] = entry["hooks"]
+            return
+    arr.append(entry)
+
+
+def _purge_odin_local(workdir: str) -> bool:
+    """Cabut SELURUH jejak odin (mcpServers/hooks/allow) dari .claude/settings.json
+    sebuah workdir — dipakai saat migrasi ke config global agar tak ada definisi ganda.
+    Hanya menyentuh key milik odin; hook/allow user lain dipertahankan."""
+    changed = False
+    sp = Path(workdir) / ".claude" / "settings.json"
+    if sp.exists():
+        try:
+            s = json.loads(sp.read_text())
+        except (json.JSONDecodeError, OSError):
+            s = None
+        if isinstance(s, dict):
+            if "odin" in (s.get("mcpServers") or {}):
+                s["mcpServers"].pop("odin", None); changed = True
+                if not s["mcpServers"]:
+                    s.pop("mcpServers", None)
+            hooks = s.get("hooks") or {}
+            for ev in list(hooks.keys()):
+                kept = [h for h in hooks[ev]
+                        if not str(h.get("matcher", "")).startswith("mcp__odin__")]
+                if len(kept) != len(hooks[ev]):
+                    changed = True
+                    hooks[ev] = kept
+                if not hooks[ev]:
+                    hooks.pop(ev, None)
+            if "hooks" in s and not s["hooks"]:
+                s.pop("hooks", None)
+            allow = (s.get("permissions") or {}).get("allow")
+            if isinstance(allow, list):
+                new_allow = [a for a in allow if a not in READ_ONLY_TOOLS]
+                if len(new_allow) != len(allow):
+                    changed = True
+                    if new_allow:
+                        s["permissions"]["allow"] = new_allow
+                    else:
+                        s["permissions"].pop("allow", None)
+                        if not s["permissions"]:
+                            s.pop("permissions", None)
+            if changed:
+                if s:
+                    sp.write_text(json.dumps(s, indent=2) + "\n")
+                else:
+                    sp.unlink()
+                    cd = sp.parent
+                    if cd.exists() and not any(cd.iterdir()):
+                        cd.rmdir()
+    if _strip_odin_from_mcp_json(workdir):
+        changed = True
+    return changed
+
+
+def cmd_global_enable(migrate: bool = False) -> None:
+    """Pasang ODIN MCP di scope-user agar tersedia OTOMATIS di tiap project terdaftar."""
+    USER_CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
+    sp = USER_CLAUDE_DIR / "settings.json"
+    settings: dict = {}
+    if sp.exists():
+        try:
+            settings = json.loads(sp.read_text())
+        except json.JSONDecodeError:
+            warn(f"{sp} bukan JSON valid — dibiarkan, batal.")
+            return
+
+    settings.setdefault("mcpServers", {})["odin"] = _global_mcp_entry()
+
+    guard = _guard_path()
+    cmd = f"python3 '{guard}'"
+    _ensure_guard_hook(settings, "PreToolUse",
+        "mcp__odin__(run_command|service_action|laravel_deploy|run_tests|runbook|inspect_server|memory_write|memory_forget)",
+        cmd)
+    _ensure_guard_hook(settings, "PostToolUse", "mcp__odin__inspect_server", cmd)
+
+    allow = settings.setdefault("permissions", {}).setdefault("allow", [])
+    for t in READ_ONLY_TOOLS:
+        if t not in allow:
+            allow.append(t)
+
+    sp.write_text(json.dumps(settings, indent=2) + "\n")
+    ok(f"ODIN MCP global aktif → {sp}")
+    info("Tiap project terdaftar otomatis dapat MCP odin (resolusi project dari cwd).")
+
+    if migrate:
+        cleaned = []
+        for name in list_projects():
+            wd = load_project(name).get("local_workdir")
+            if wd and Path(wd).exists() and _purge_odin_local(wd):
+                cleaned.append(name)
+        if cleaned:
+            ok(f"Entry per-workdir lama dibersihkan: {', '.join(cleaned)} "
+               f"(global jadi satu-satunya sumber, tanpa definisi/hook ganda).")
+        else:
+            info("Tidak ada entry per-workdir lama yang perlu dibersihkan.")
+    warn("Restart Claude Code agar perubahan MCP termuat (MCP dimuat saat startup).")
+
+
+def cmd_global_disable() -> None:
+    """Cabut entry odin global dari ~/.claude/settings.json (hook/allow dibiarkan)."""
+    sp = USER_CLAUDE_DIR / "settings.json"
+    if not sp.exists():
+        warn("Tidak ada config global (~/.claude/settings.json).")
+        return
+    try:
+        s = json.loads(sp.read_text())
+    except json.JSONDecodeError:
+        err(f"{sp} bukan JSON valid."); return
+    if "odin" not in (s.get("mcpServers") or {}):
+        info("Entry odin global tidak ditemukan — tidak ada yang dicabut.")
+        return
+    s["mcpServers"].pop("odin", None)
+    if not s["mcpServers"]:
+        s.pop("mcpServers", None)
+    sp.write_text(json.dumps(s, indent=2) + "\n")
+    ok("ODIN MCP global dinonaktifkan.")
+    warn("Restart Claude Code agar perubahan termuat.")
 
 
 def get_odin_version() -> str:
@@ -1103,6 +1241,14 @@ def main() -> None:
     prem_p = proj_sub.add_parser("remove", help="Hapus project")
     prem_p.add_argument("name", help="Nama project")
 
+    # global (MCP scope-user → tersedia di semua project)
+    glob_p = sub.add_parser("global", help="Kelola ODIN MCP global (semua project)")
+    glob_sub = glob_p.add_subparsers(dest="action")
+    genable_p = glob_sub.add_parser("enable", help="Aktifkan MCP odin di scope-user")
+    genable_p.add_argument("--migrate", action="store_true",
+                           help="Cabut entry per-workdir lama agar tak ada definisi/hook ganda")
+    glob_sub.add_parser("disable", help="Nonaktifkan MCP odin global")
+
     # update
     upd_p = sub.add_parser("update", help="Update ODIN di server")
     upd_p.add_argument("alias", help="Alias server")
@@ -1139,6 +1285,13 @@ def main() -> None:
             cmd_project_remove(args.name)
         else:
             proj_p.print_help()
+    elif args.command == "global":
+        if args.action == "enable":
+            cmd_global_enable(getattr(args, "migrate", False))
+        elif args.action == "disable":
+            cmd_global_disable()
+        else:
+            glob_p.print_help()
     elif args.command == "update":
         cmd_update(args.alias)
     elif args.command == "doctor":

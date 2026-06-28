@@ -189,7 +189,7 @@ class TestSettingsJsonGeneration:
             settings = json.loads(settings_path.read_text())
             odin_mcp = settings["mcpServers"]["odin"]
             assert odin_mcp["args"] == [
-                "vps-app", "/home/odin/run.sh", "--project", "simuru"
+                "-q", "-T", "vps-app", "/home/odin/run.sh", "--project", "simuru"
             ]
             assert "mcp__odin__server_info" in settings["permissions"]["allow"]
 
@@ -490,7 +490,7 @@ class TestMcpJsonMigration:
         path = odin_cli._write_local_mcp_config(str(wd), "srv1", "proj")
         settings = json.loads(path.read_text())
         assert settings["mcpServers"]["odin"]["args"] == [
-            "srv1", "/home/odin/run.sh", "--project", "proj"]
+            "-q", "-T", "srv1", "/home/odin/run.sh", "--project", "proj"]
         # odin dipindah dari .mcp.json, server lain dipertahankan
         mcp = json.loads((wd / ".mcp.json").read_text())
         assert "odin" not in mcp["mcpServers"]
@@ -555,7 +555,7 @@ class TestProjectAddNonInteractive:
                 odin_cli.cmd_project_add(args)
             settings = json.loads((workdir / ".claude" / "settings.json").read_text())
             assert settings["mcpServers"]["odin"]["args"] == [
-                "gibtha_srv", "/home/odin/run.sh", "--project", "foo"]
+                "-q", "-T", "gibtha_srv", "/home/odin/run.sh", "--project", "foo"]
             assert odin_cli.load_project("foo")["server"] == "gibtha_srv"
 
     def test_rejects_invalid_remote_root(self, tmp_path):
@@ -591,4 +591,134 @@ class TestProjectSync:
             odin_cli.cmd_project_sync("syncme")
             settings = json.loads((workdir / ".claude" / "settings.json").read_text())
             assert settings["mcpServers"]["odin"]["args"] == [
-                "srv", "/home/odin/run.sh", "--project", "syncme"]
+                "-q", "-T", "srv", "/home/odin/run.sh", "--project", "syncme"]
+
+
+# ── odin global (MCP scope-user) ─────────────────────────────────────────────
+
+class TestGlobalMcp:
+    def _enable(self, tmp_path, migrate=False):
+        user_claude = tmp_path / "userclaude"
+        with patch.object(odin_cli, "USER_CLAUDE_DIR", user_claude):
+            odin_cli.cmd_global_enable(migrate=migrate)
+        return user_claude / "settings.json"
+
+    def test_enable_writes_launcher_entry(self, tmp_path):
+        _setup_dirs(tmp_path)
+        with _patch_dirs(tmp_path):
+            sp = self._enable(tmp_path)
+        s = json.loads(sp.read_text())
+        odin = s["mcpServers"]["odin"]
+        assert odin["command"] == "python3"
+        assert odin["args"][0].endswith("odin_mcp_launch.py")
+        assert any(h["matcher"].startswith("mcp__odin__")
+                   for h in s["hooks"]["PreToolUse"])
+        assert "mcp__odin__server_info" in s["permissions"]["allow"]
+
+    def test_enable_preserves_existing_user_config(self, tmp_path):
+        _setup_dirs(tmp_path)
+        user_claude = tmp_path / "userclaude"
+        user_claude.mkdir()
+        (user_claude / "settings.json").write_text(json.dumps({
+            "model": "opus",
+            "hooks": {"PreToolUse": [
+                {"matcher": "Bash", "hooks": [{"type": "command", "command": "x"}]}]},
+            "permissions": {"allow": ["Bash(ls)"]},
+        }))
+        with _patch_dirs(tmp_path), patch.object(odin_cli, "USER_CLAUDE_DIR", user_claude):
+            odin_cli.cmd_global_enable()
+        s = json.loads((user_claude / "settings.json").read_text())
+        assert s["model"] == "opus"
+        matchers = [h["matcher"] for h in s["hooks"]["PreToolUse"]]
+        assert "Bash" in matchers                                   # hook user dipertahankan
+        assert any(m.startswith("mcp__odin__") for m in matchers)   # hook odin ditambah
+        assert "Bash(ls)" in s["permissions"]["allow"]              # allow user dipertahankan
+
+    def test_enable_idempotent(self, tmp_path):
+        _setup_dirs(tmp_path)
+        user_claude = tmp_path / "userclaude"
+        with _patch_dirs(tmp_path), patch.object(odin_cli, "USER_CLAUDE_DIR", user_claude):
+            odin_cli.cmd_global_enable()
+            odin_cli.cmd_global_enable()
+        s = json.loads((user_claude / "settings.json").read_text())
+        assert len(s["hooks"]["PreToolUse"]) == 1                   # tak duplikat hook
+        assert [a for a in s["permissions"]["allow"]
+                if a == "mcp__odin__server_info"] == ["mcp__odin__server_info"]
+
+    def test_disable_removes_entry(self, tmp_path):
+        _setup_dirs(tmp_path)
+        user_claude = tmp_path / "userclaude"
+        with _patch_dirs(tmp_path), patch.object(odin_cli, "USER_CLAUDE_DIR", user_claude):
+            odin_cli.cmd_global_enable()
+            odin_cli.cmd_global_disable()
+        s = json.loads((user_claude / "settings.json").read_text())
+        assert "odin" not in (s.get("mcpServers") or {})
+
+    def test_migrate_purges_per_workdir(self, tmp_path):
+        _setup_dirs(tmp_path)
+        workdir = tmp_path / "PROJ"
+        workdir.mkdir()
+        with _patch_dirs(tmp_path):
+            odin_cli.save_server("srv", {"name": "srv"})
+            odin_cli.save_project("proj", {"name": "proj", "server": "srv",
+                "remote_root": "/var/www/proj", "local_workdir": str(workdir)})
+            odin_cli._write_local_mcp_config(str(workdir), "srv", "proj")
+            assert "odin" in json.loads(
+                (workdir / ".claude" / "settings.json").read_text())["mcpServers"]
+            self._enable(tmp_path, migrate=True)
+        assert not (workdir / ".claude" / "settings.json").exists()
+
+
+class TestPurgeOdinLocal:
+    def test_keeps_user_hooks_and_allow(self, tmp_path):
+        wd = tmp_path / "WD"
+        (wd / ".claude").mkdir(parents=True)
+        odin_hook = {"matcher": "mcp__odin__(run_command)",
+                     "hooks": [{"type": "command", "command": "g"}]}
+        user_hook = {"matcher": "Bash", "hooks": [{"type": "command", "command": "x"}]}
+        (wd / ".claude" / "settings.json").write_text(json.dumps({
+            "mcpServers": {"odin": {"command": "ssh"}, "other": {"command": "y"}},
+            "hooks": {"PreToolUse": [odin_hook, user_hook]},
+            "permissions": {"allow": ["mcp__odin__server_info", "Bash(ls)"]},
+        }))
+        assert odin_cli._purge_odin_local(str(wd))
+        s = json.loads((wd / ".claude" / "settings.json").read_text())
+        assert "odin" not in s["mcpServers"] and "other" in s["mcpServers"]
+        assert [h["matcher"] for h in s["hooks"]["PreToolUse"]] == ["Bash"]
+        assert s["permissions"]["allow"] == ["Bash(ls)"]
+
+
+class TestLauncherDetect:
+    def _detect(self, tmp_path, cwd):
+        import odin_mcp_launch
+        with patch.object(odin_mcp_launch, "PROJECTS_DIR", tmp_path / "projects"):
+            return odin_mcp_launch._detect(str(cwd))
+
+    def _mk_project(self, tmp_path, name, workdir):
+        projects = tmp_path / "projects"
+        projects.mkdir(exist_ok=True)
+        (projects / f"{name}.yaml").write_text(
+            f"name: {name}\nserver: srv\nlocal_workdir: {workdir}\n")
+
+    def test_exact_match(self, tmp_path):
+        wd = tmp_path / "REPO"; wd.mkdir()
+        self._mk_project(tmp_path, "repo", wd)
+        assert self._detect(tmp_path, wd)["name"] == "repo"
+
+    def test_subdir_prefix_match(self, tmp_path):
+        wd = tmp_path / "REPO"; (wd / "sub" / "deep").mkdir(parents=True)
+        self._mk_project(tmp_path, "repo", wd)
+        assert self._detect(tmp_path, wd / "sub" / "deep")["name"] == "repo"
+
+    def test_no_match_returns_none(self, tmp_path):
+        wd = tmp_path / "REPO"; wd.mkdir()
+        self._mk_project(tmp_path, "repo", wd)
+        other = tmp_path / "ELSEWHERE"; other.mkdir()
+        assert self._detect(tmp_path, other) is None
+
+    def test_longest_prefix_wins(self, tmp_path):
+        parent = tmp_path / "MONO"; child = parent / "pkg"
+        child.mkdir(parents=True)
+        self._mk_project(tmp_path, "mono", parent)
+        self._mk_project(tmp_path, "pkg", child)
+        assert self._detect(tmp_path, child)["name"] == "pkg"
