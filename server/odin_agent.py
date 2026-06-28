@@ -1599,13 +1599,13 @@ def _inspect_base() -> dict:
         "echo '@@KERNEL@@'; uname -r 2>/dev/null || echo unknown; "
         "echo '@@UPTIME@@'; uptime -s 2>/dev/null || echo unknown; "
         "echo '@@DISK@@'; df --output=pcent / 2>/dev/null | tail -1 || df -h / | awk 'NR==2{print $5}'; "
-        "echo '@@MEM_PCT@@'; free 2>/dev/null | awk '/^Mem:/{printf \"%.0f\", $3/$2*100}' || echo 0; "
-        "echo '@@MEM@@'; free -m 2>/dev/null | awk '/^Mem:/{printf \"%d/%dMB\", $3, $2}' || echo unknown; "
+        "echo '@@MEM_PCT@@'; free 2>/dev/null | awk '/^Mem:/{printf \"%.0f\\n\", $3/$2*100}' || echo 0; "
+        "echo '@@MEM@@'; free -m 2>/dev/null | awk '/^Mem:/{printf \"%d/%dMB\\n\", $3, $2}' || echo unknown; "
         "echo '@@UFW@@'; ufw status 2>/dev/null | head -1 || echo not-installed; "
         "echo '@@F2B@@'; systemctl is-active fail2ban 2>/dev/null || echo not-installed; "
         "echo '@@SSHPORT@@'; grep -E '^Port ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo 22; "
         "echo '@@SSHAUTH@@'; grep -E '^PasswordAuthentication ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo unknown; "
-        "echo '@@CRON@@'; crontab -l 2>/dev/null | grep -cv '^#\\|^$' || echo 0; "
+        "echo '@@CRON@@'; crontab -l 2>/dev/null | grep -cv '^#\\|^$' || true; "
         "echo '@@USERS@@'; getent passwd 2>/dev/null | awk -F: '$7 ~ /\\/(bash|sh|zsh)$/ {print $1}' | paste -sd, || echo unknown",
         None, 30)
     s = _parse_sections(r.get("stdout", ""))
@@ -1617,18 +1617,23 @@ def _inspect_base() -> dict:
             uptime_days = (datetime.now() - boot).days
         except (ValueError, TypeError):
             pass
-    dp = s.get("DISK", "0").strip().rstrip("%").strip()
+    def _first_int(raw: str, default: int = 0) -> int:
+        """Ambil integer dari baris pertama saja — tahan terhadap output multi-baris."""
+        first = raw.strip().split("\n")[0].strip().rstrip("%").strip()
+        return int(first) if first.lstrip("-").isdigit() else default
+
+    dp = s.get("DISK", "0")
     return {
         "os": s.get("OS", "unknown"), "kernel": s.get("KERNEL", "unknown"),
         "uptime_days": uptime_days,
-        "disk_pct": int(dp) if dp.isdigit() else 0,
-        "memory": s.get("MEM", "unknown"),
-        "memory_pct": int(s.get("MEM_PCT", "0").strip() or "0"),
+        "disk_pct": _first_int(dp),
+        "memory": s.get("MEM", "unknown").split("\n")[0].strip(),
+        "memory_pct": _first_int(s.get("MEM_PCT", "0")),
         "firewall": "active" if "active" in s.get("UFW", "").lower() else s.get("UFW", "unknown"),
-        "fail2ban": s.get("F2B", "not-installed"),
-        "ssh_port": s.get("SSHPORT", "22").strip(),
+        "fail2ban": s.get("F2B", "not-installed").split("\n")[0].strip(),
+        "ssh_port": s.get("SSHPORT", "22").split("\n")[0].strip(),
         "ssh_auth": "password" if s.get("SSHAUTH", "").strip().lower() == "yes" else "key",
-        "cron_jobs": int(s.get("CRON", "0").strip() or "0"),
+        "cron_jobs": _first_int(s.get("CRON", "0")),
         "login_users": [u.strip() for u in s.get("USERS", "").split(",") if u.strip()],
     }
 
@@ -3270,7 +3275,7 @@ def health_live() -> str:
     issues: list[str] = []
     r = _run(
         "echo '@@DISK@@'; df --output=pcent / 2>/dev/null | tail -1 || df -h / | awk 'NR==2{print $5}'; "
-        "echo '@@MEM@@'; free 2>/dev/null | awk '/^Mem:/{printf \"%.0f\", $3/$2*100}' || echo 0; "
+        "echo '@@MEM@@'; free 2>/dev/null | awk '/^Mem:/{printf \"%.0f\\n\", $3/$2*100}' || echo 0; "
         "echo '@@LOAD@@'; cat /proc/loadavg 2>/dev/null | awk '{print $1}' || echo 0; "
         "echo '@@NGINX@@'; systemctl is-active nginx 2>/dev/null || echo unknown; "
         "echo '@@MYSQL@@'; systemctl is-active mysql 2>/dev/null || echo unknown; "
