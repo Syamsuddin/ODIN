@@ -1,0 +1,26 @@
+# ODIN Local Project Configuration
+# Lokasi: ~/.odin/server/projects/<nama-project>.conf
+# Digunakan oleh run.sh saat --project <nama-project>
+
+# Nama project (wajib, tampil di risk card & status)
+PROJECT_NAME="myproject"
+
+# Root folder project di laptop (path absolut)
+PROJECT_ROOT="/home/user/Projects/myproject"
+
+# Mode eksekusi: "local" untuk laptop, "ssh" untuk VPS remote
+DEPLOY_MODE="local"
+
+# Folder yang boleh dibaca oleh tail_log (pisahkan dengan koma)
+# Sesuaikan dengan lokasi log project kamu
+ALLOWED_LOG_DIRS="/var/log,/tmp,$PROJECT_ROOT/storage/logs"
+
+# Timeout default perintah (detik)
+# DEFAULT_TIMEOUT="120"
+
+# Kunci perintah agar hanya bisa dijalankan di PROJECT_ROOT
+# Set "1" untuk membatasi scope (rekomendasi untuk keamanan)
+# LOCK_CWD_TO_PROJECT="0"
+
+# Level log ODIN (DEBUG, INFO, WARNING, ERROR)
+# AGENT_LOG_LEVEL="INFO"

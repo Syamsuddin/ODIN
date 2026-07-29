@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "odin": {
+      "type": "stdio",
+      "command": "/home/USER/.odin/server/run.sh",
+      "args": ["--project", "myproject"],
+      "env": {}
+    }
+  }
+}

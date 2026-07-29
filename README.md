@@ -102,6 +102,7 @@ ODIN/
 │   ├── test_guard_multiproject.py (24)  # Project awareness tests
 │   └── test_cli.py          # (24) — CLI + run.sh + project tests
 ├── docs/
+│   ├── INSTALL_LOCAL.md    # Panduan instalasi lokal (tanpa VPS)
 │   └── MEMORY_NOTES.md
 ├── install.sh               # Installer v2.1 (macOS & Linux)
 ├── install.ps1              # Installer v2.1 (Windows PowerShell)
@@ -513,6 +514,36 @@ odin project switch <name>
 
 # 7. Regenerasi config lokal (mis. setelah repo ODIN dipindah)
 odin project sync --all
+```
+
+### Instalasi Lokal (Tanpa VPS)
+
+Ingin menjalankan ODIN langsung di laptop tanpa server remote? Lihat panduan lengkap:
+
+**[docs/INSTALL_LOCAL.md](docs/INSTALL_LOCAL.md)**
+
+Ringkasan singkat:
+
+```bash
+# 1. Clone ODIN
+git clone --depth 1 https://github.com/Syamsuddin/ODIN.git ~/.odin
+
+# 2. Setup venv & install dependensi
+cd ~/.odin/server && python3 -m venv .venv && .venv/bin/pip install "mcp[cli]"
+
+# 3. Buat config project
+mkdir -p projects
+cat > projects/myproject.conf << 'EOF'
+PROJECT_NAME="myproject"
+PROJECT_ROOT="/path/ke/project"
+DEPLOY_MODE="local"
+ALLOWED_LOG_DIRS="/var/log,/tmp"
+EOF
+
+# 4. Chmod run.sh
+chmod +x run.sh
+
+# 5. Tambahkan MCP config ke project (lihat examples/mcp.local.json.example)
 ```
 
 ### Uninstall
