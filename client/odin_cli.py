@@ -897,7 +897,8 @@ def _authorized_keys_line(pubkey: str) -> str:
 
 
 # ── odin server add ─────────────────────────────────────────────────────────
-def cmd_server_add() -> None:
+def cmd_server_add() -> str | None:
+    """Wizard tambah server. Return alias bila tuntas, None bila gagal/dibatalkan."""
     ensure_dirs()
     banner("ODIN — Tambah Server")
 
@@ -1080,15 +1081,17 @@ def cmd_server_add() -> None:
     print()
     ok(f"Server '{alias}' siap!")
     info("Selanjutnya: odin project add")
+    return alias
 
 
 # ── odin project add ────────────────────────────────────────────────────────
-def cmd_project_add(args=None) -> None:
+def cmd_project_add(args=None) -> str | None:
+    """Wizard tambah project. Return nama project bila tuntas, None bila gagal."""
     ensure_dirs()
     servers = list_servers()
     if not servers:
         err("Belum ada server. Jalankan 'odin server add' dulu.")
-        return
+        return None
 
     # Mode non-interaktif aktif bila --yes diberikan (pakai default & lewati prompt).
     auto = bool(getattr(args, "yes", False))
@@ -1197,6 +1200,7 @@ def cmd_project_add(args=None) -> None:
     print()
     ok(f"Project '{name}' siap!")
     info(f"Untuk mulai: cd {local_workdir} && claude")
+    return name
 
 
 # ── odin server list ────────────────────────────────────────────────────────
@@ -1837,6 +1841,411 @@ def cmd_doctor(alias: str) -> None:
     print()
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# INSTALASI — setup / self-update / uninstall / doctor lokal / version
+#
+# Tata letak laptop (dibuat install.sh / install.ps1):
+#   ~/.odin/app/          kode (git checkout tag) → ODIN_INSTALL_DIR
+#   ~/.odin/app/.venv/    dependensi CLI terisolasi
+#   ~/.odin/bin/odin      wrapper CLI  (+ ~/.local/bin/odin → wrapper)
+#   ~/.odin/{keys,servers,projects,modes,ssh_config}   state — TIDAK PERNAH
+#                         disentuh installer/self-update; hanya `uninstall --purge`.
+# ═══════════════════════════════════════════════════════════════════════════
+ODIN_BIN_WRAPPER = ODIN_DIR / "bin" / "odin"
+LOCAL_BIN_LINK = Path.home() / ".local" / "bin" / "odin"
+SLASH_CMD_DST = USER_CLAUDE_DIR / "commands" / "odin"
+INSTALL_CMD = "curl -fsSL https://raw.githubusercontent.com/Syamsuddin/ODIN/main/install.sh | bash"
+
+
+def _git(args: list[str], cwd: Path | None = None) -> tuple[bool, str]:
+    """Jalankan git di ODIN_INSTALL_DIR; return (sukses, output gabungan)."""
+    try:
+        r = subprocess.run(["git", "-C", str(cwd or ODIN_INSTALL_DIR), *args],
+                           capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
+    return r.returncode == 0, (r.stdout + r.stderr).strip()
+
+
+def _app_git_desc() -> str:
+    okg, out = _git(["describe", "--tags", "--always", "--dirty"])
+    return out if okg else "?"
+
+
+def _app_ref_kind() -> tuple[str, str]:
+    """('branch', nama) bila checkout mengikuti branch; ('tag'/'commit', desc) bila detached."""
+    okg, out = _git(["symbolic-ref", "--quiet", "--short", "HEAD"])
+    if okg and out:
+        return "branch", out
+    okg, out = _git(["describe", "--tags", "--exact-match"])
+    return ("tag", out) if okg else ("commit", _app_git_desc())
+
+
+def _latest_tag() -> str | None:
+    okg, out = _git(["tag", "--list", "v*", "--sort=-v:refname"])
+    if not okg or not out:
+        return None
+    return out.splitlines()[0].strip() or None
+
+
+def _install_slash_commands() -> bool:
+    src = ODIN_INSTALL_DIR / ".claude" / "commands" / "odin"
+    if not src.is_dir():
+        return False
+    SLASH_CMD_DST.mkdir(parents=True, exist_ok=True)
+    for f in src.glob("*.md"):
+        shutil.copy2(f, SLASH_CMD_DST / f.name)
+    return True
+
+
+# ── odin version ────────────────────────────────────────────────────────────
+def cmd_version() -> None:
+    kind, ref = _app_ref_kind()
+    print(f"ODIN v{get_odin_version()}")
+    print(f"  kode   : {ODIN_INSTALL_DIR}  ({kind} {ref})")
+    print(f"  state  : {ODIN_DIR}")
+    print(f"  python : {sys.version.split()[0]}  ({sys.executable})")
+
+
+# ── odin doctor (tanpa alias → laptop) ─────────────────────────────────────
+def _local_checks() -> list[tuple[str, bool, str]]:
+    """Pemeriksaan sisi laptop. Return [(label, ok, detail)] — murni, mudah diuji."""
+    checks: list[tuple[str, bool, str]] = []
+    v = sys.version_info
+    checks.append(("Python >= 3.10", v >= (3, 10), f"{v.major}.{v.minor}.{v.micro}"))
+    checks.append(("paramiko", paramiko is not None,
+                   getattr(paramiko, "__version__", "") if paramiko else "pip install paramiko"))
+    checks.append(("pyyaml", yaml is not None, "" if yaml else "fallback JSON aktif"))
+    for tool, why in (("git", "self-update"), ("ssh", "koneksi server"),
+                      ("claude", "Claude Code CLI")):
+        path = shutil.which(tool)
+        checks.append((tool, bool(path), path or f"tidak ada di PATH ({why})"))
+
+    cli = ODIN_INSTALL_DIR / "client" / "odin_cli.py"
+    kind, ref = _app_ref_kind()
+    checks.append(("Kode ODIN", cli.is_file(), f"{ODIN_INSTALL_DIR} ({kind} {ref})"))
+    checks.append(("Wrapper odin", ODIN_BIN_WRAPPER.is_file(),
+                   str(ODIN_BIN_WRAPPER) if ODIN_BIN_WRAPPER.is_file() else "jalankan ulang installer"))
+    link_ok = LOCAL_BIN_LINK.exists()
+    checks.append(("~/.local/bin/odin", link_ok,
+                   str(LOCAL_BIN_LINK.resolve()) if link_ok else "jalankan ulang installer"))
+    on_path = str(LOCAL_BIN_LINK.parent) in os.environ.get("PATH", "").split(os.pathsep)
+    checks.append(("~/.local/bin di PATH", on_path,
+                   "" if on_path else 'export PATH="$HOME/.local/bin:$PATH"'))
+
+    checks.append(("MCP odin global (~/.claude.json)", _has_global_odin_mcp(),
+                   "" if _has_global_odin_mcp() else "odin global enable"))
+    hook_ok = False
+    sp = USER_CLAUDE_DIR / "settings.json"
+    if sp.exists():
+        try:
+            hooks = (json.loads(sp.read_text()).get("hooks") or {}).get("PreToolUse") or []
+            hook_ok = any(str(h.get("matcher", "")).startswith("mcp__odin__") for h in hooks)
+        except (json.JSONDecodeError, OSError):
+            pass
+    checks.append(("Guard hook global", hook_ok, "" if hook_ok else "odin global enable"))
+    checks.append(("Slash command /odin:*", (SLASH_CMD_DST / "status.md").is_file(),
+                   str(SLASH_CMD_DST)))
+
+    servers, projects = list_servers(), list_projects()
+    checks.append(("Server terdaftar", bool(servers), ", ".join(servers) or "odin setup"))
+    missing = []
+    for p in projects:
+        try:
+            wd = load_project(p).get("local_workdir", "")
+        except SystemExit:
+            continue
+        if wd and not Path(wd).is_dir():
+            missing.append(f"{p} → {wd}")
+    checks.append(("Project terdaftar", bool(projects) and not missing,
+                   ", ".join(projects) if not missing else "workdir hilang: " + "; ".join(missing)))
+    return checks
+
+
+def cmd_doctor_local() -> None:
+    banner("ODIN — Doctor (laptop)")
+    bad = 0
+    for label, good, detail in _local_checks():
+        status = _c("0;32", " OK ") if good else _c("0;31", "FAIL")
+        bad += 0 if good else 1
+        print(f"  [{status}] {label}{'  — ' + detail if detail else ''}")
+    print()
+    if bad:
+        warn(f"{bad} pemeriksaan gagal — lihat saran di sebelah kanan.")
+    else:
+        ok("Laptop siap.")
+    servers = list_servers()
+    if servers:
+        info("Cek server: " + "  ".join(f"odin doctor {s}" for s in servers))
+
+
+# ── odin setup ──────────────────────────────────────────────────────────────
+def cmd_setup(args=None) -> None:
+    """Satu wizard dari nol sampai siap: server → project → Claude Code → verifikasi.
+
+    Setiap tahap idempoten: yang sudah ada dilewati, jadi aman dijalankan ulang."""
+    ensure_dirs()
+    banner("ODIN — Setup")
+    print("  Empat tahap: server → project → Claude Code → verifikasi.")
+    print("  Tahap yang sudah beres akan dilewati.\n")
+
+    # ── 1. Server ──
+    print(_c("1", "  [1/4] Server"))
+    servers = list_servers()
+    alias: str | None = None
+    if servers:
+        info(f"Server terdaftar: {', '.join(servers)}")
+        if confirm("Tambah server BARU?", default=False):
+            alias = cmd_server_add()
+        elif len(servers) == 1:
+            alias = servers[0]
+        else:
+            alias = servers[ask_choice("Pakai server", servers) - 1]
+    else:
+        info("Belum ada server — wizard 'server add' dimulai.")
+        alias = cmd_server_add()
+    if not alias:
+        err("Tahap server tidak tuntas — setup dihentikan. Ulangi: odin setup")
+        return
+    ok(f"Server: {alias}")
+
+    # ── 2. Project ──
+    print("\n" + _c("1", "  [2/4] Project"))
+    name: str | None = _detect_current_project()
+    if name:
+        ok(f"Folder ini sudah terdaftar sebagai project '{name}'")
+    else:
+        cwd = str(Path.cwd())
+        info(f"Workdir: {cwd}")
+        ns = argparse.Namespace(
+            name=getattr(args, "name", None), server=alias,
+            remote_root=getattr(args, "remote_root", None),
+            workdir=getattr(args, "workdir", None) or cwd, yes=False)
+        name = cmd_project_add(ns)
+    if not name:
+        err("Tahap project tidak tuntas — setup dihentikan. Ulangi: odin setup")
+        return
+
+    # ── 3. Claude Code ──
+    print("\n" + _c("1", "  [3/4] Claude Code"))
+    if _has_global_odin_mcp():
+        ok("MCP odin global sudah aktif")
+    elif confirm("Aktifkan MCP odin GLOBAL (otomatis tersedia di semua project terdaftar)?",
+                 default=True):
+        cmd_global_enable(migrate=True)
+    else:
+        info("Memakai config per-workdir (.claude/settings.json).")
+    if not shutil.which("claude"):
+        warn("Claude Code CLI tidak ditemukan di PATH — install: https://claude.com/claude-code")
+
+    # ── 4. Verifikasi ──
+    print("\n" + _c("1", "  [4/4] Verifikasi"))
+    proj = load_project(name)
+    server = load_server(proj["server"])
+    ssh = SSHSession(server["host"], int(server.get("port", 22)), "odin",
+                     key_path=server.get("key", ""))
+    try:
+        ssh.connect()
+        live, detail = _mcp_handshake(ssh, name)
+        ssh.close()
+    except Exception as e:
+        live, detail = False, str(e)
+    if live:
+        ok(f"Handshake MCP project '{name}' OK ({detail})")
+    else:
+        err(f"Handshake MCP GAGAL: {detail}")
+        info(f"Diagnosa: odin doctor {proj['server']}")
+
+    wd = proj.get("local_workdir", str(Path.cwd()))
+    print()
+    ok("Setup selesai." if live else "Setup selesai dengan peringatan.")
+    print(f"\n  Mulai bekerja:\n    {_c('0;36', f'cd {wd} && claude')}\n")
+    print(f"  Di dalam Claude Code: {_c('0;36', '/odin:status')}")
+    warn("Claude Code memuat MCP saat START — buka sesi baru, bukan sesi yang sedang berjalan.")
+
+
+# ── odin self-update ────────────────────────────────────────────────────────
+def cmd_self_update(version: str | None = None) -> None:
+    """Perbarui kode ODIN di laptop (bukan server — itu `odin update <alias>`)."""
+    if not (ODIN_INSTALL_DIR / ".git").is_dir():
+        err(f"{ODIN_INSTALL_DIR} bukan checkout git — pasang ulang dengan installer:")
+        info(INSTALL_CMD)
+        return
+    banner("ODIN — Self-update")
+    before_ver = get_odin_version()
+    _, before_rev = _git(["rev-parse", "HEAD"])
+
+    okg, out = _git(["fetch", "--quiet", "--tags", "origin"])
+    if not okg:
+        err(f"Gagal fetch: {out[:200]}")
+        return
+
+    kind, ref = _app_ref_kind()
+    target = version
+    if not target:
+        # Mengikuti branch → perbarui branch itu; ter-pin ke tag → tag terbaru.
+        target = ref if kind == "branch" else (_latest_tag() or "main")
+    info(f"Target: {target}")
+
+    okb, _ = _git(["show-ref", "--verify", "--quiet", f"refs/remotes/origin/{target}"])
+    if okb:
+        okc, out = _git(["checkout", "--quiet", "-B", target, f"origin/{target}"])
+    else:
+        okc, out = _git(["checkout", "--quiet", "--detach", target])
+    if not okc:
+        err(f"Gagal checkout '{target}': {out[:200]}")
+        return
+
+    _, after_rev = _git(["rev-parse", "HEAD"])
+    after_ver = get_odin_version()
+    if before_rev == after_rev:
+        ok(f"Sudah versi terbaru — v{after_ver} ({_app_git_desc()})")
+    else:
+        ok(f"v{before_ver} → v{after_ver} ({_app_git_desc()})")
+
+    # Dependensi: hanya bila requirements berubah (hemat waktu, tanpa jaringan).
+    _, changed = _git(["diff", "--name-only", before_rev, after_rev])
+    venv_py = ODIN_INSTALL_DIR / ".venv" / "bin" / "python"
+    if "requirements-cli.txt" in changed and venv_py.exists():
+        info("requirements-cli.txt berubah — memperbarui dependensi")
+        r = subprocess.run([str(venv_py), "-m", "pip", "install", "--quiet", "-r",
+                            str(ODIN_INSTALL_DIR / "requirements-cli.txt")],
+                           capture_output=True, text=True)
+        ok("Dependensi diperbarui") if r.returncode == 0 else warn(
+            f"pip gagal: {r.stderr.strip()[:200]}")
+
+    if _install_slash_commands():
+        ok(f"Slash command /odin:* diperbarui")
+    if before_rev != after_rev:
+        info("Server belum ikut berubah — jalankan: odin update <alias>")
+
+
+# ── odin uninstall ──────────────────────────────────────────────────────────
+def _purge_odin_settings_file(sp: Path) -> bool:
+    """Cabut mcpServers.odin, hook mcp__odin__*, dan allow-list ODIN dari satu
+    settings.json. Key lain milik user dipertahankan. Return True bila berubah."""
+    if not sp.exists():
+        return False
+    try:
+        s = json.loads(sp.read_text())
+    except (json.JSONDecodeError, OSError):
+        return False
+    if not isinstance(s, dict):
+        return False
+    changed = False
+    if "odin" in (s.get("mcpServers") or {}):
+        s["mcpServers"].pop("odin")
+        changed = True
+        if not s["mcpServers"]:
+            s.pop("mcpServers")
+    hooks = s.get("hooks") or {}
+    for ev in list(hooks):
+        kept = [h for h in hooks[ev]
+                if not str((h or {}).get("matcher", "")).startswith("mcp__odin__")]
+        if len(kept) != len(hooks[ev]):
+            changed = True
+            if kept:
+                hooks[ev] = kept
+            else:
+                hooks.pop(ev)
+    if "hooks" in s and not s["hooks"]:
+        s.pop("hooks")
+    allow = (s.get("permissions") or {}).get("allow")
+    if isinstance(allow, list):
+        kept = [a for a in allow if not str(a).startswith("mcp__odin__")]
+        if len(kept) != len(allow):
+            changed = True
+            if kept:
+                s["permissions"]["allow"] = kept
+            else:
+                s["permissions"].pop("allow")
+                if not s["permissions"]:
+                    s.pop("permissions")
+    if changed:
+        try:
+            sp.write_text(json.dumps(s, indent=2) + "\n")
+        except OSError:
+            return False
+    return changed
+
+
+def cmd_uninstall(purge: bool = False, yes: bool = False) -> None:
+    banner("ODIN — Uninstall")
+    print("  Akan dihapus dari laptop ini:")
+    print(f"    • kode        {ODIN_INSTALL_DIR}")
+    print(f"    • wrapper     {ODIN_BIN_WRAPPER}  dan  {LOCAL_BIN_LINK}")
+    print(f"    • Claude Code entry MCP odin, hook guard, allow-list, slash command /odin:*")
+    if purge:
+        print(f"    • {_c('1;31', 'STATE')}       {ODIN_DIR}  (kunci SSH, registry server/project) — PERMANEN")
+    else:
+        print(f"    • state       {ODIN_DIR}/{{keys,servers,projects,modes}}  DIPERTAHANKAN "
+              f"(hapus dengan --purge)")
+    print("  Server TIDAK disentuh. Untuk mencabut kunci dari server jalankan dulu:")
+    print("    odin server remove <alias> --purge\n")
+    if not yes and not confirm("Lanjutkan?", default=False):
+        info("Dibatalkan.")
+        return
+    if purge and not yes and not confirm(
+            f"Yakin HAPUS {ODIN_DIR} beserta semua kunci SSH? Tidak bisa dibalik.", default=False):
+        info("Dibatalkan.")
+        return
+
+    # 1) Claude Code
+    if _claude_json_unregister_odin():
+        ok("Entry MCP odin dicabut dari ~/.claude.json")
+    if _purge_odin_settings_file(USER_CLAUDE_DIR / "settings.json"):
+        ok("Hook guard & allow-list dicabut dari ~/.claude/settings.json")
+    for name in list_projects():
+        try:
+            wd = load_project(name).get("local_workdir", "")
+        except SystemExit:
+            continue
+        if wd and Path(wd).exists() and _purge_odin_local(wd):
+            ok(f"Config per-workdir project '{name}' dibersihkan")
+    if SLASH_CMD_DST.is_dir():
+        shutil.rmtree(SLASH_CMD_DST, ignore_errors=True)
+        ok("Slash command /odin:* dihapus")
+
+    # 2) Wrapper & symlink
+    for link in (LOCAL_BIN_LINK, Path("/usr/local/bin/odin"), Path("/usr/local/bin/odin-update")):
+        try:
+            if link.is_symlink() and str(link.resolve()).startswith(str(ODIN_DIR)):
+                link.unlink()
+                ok(f"{link} dihapus")
+        except OSError:
+            warn(f"Tidak bisa menghapus {link} — hapus manual (mungkin butuh sudo).")
+    for compat in (ODIN_DIR / "client", ODIN_DIR / "server"):
+        if compat.is_symlink():
+            compat.unlink()
+    shutil.rmtree(ODIN_DIR / "bin", ignore_errors=True)
+
+    # 3) Kode
+    shutil.rmtree(ODIN_INSTALL_DIR, ignore_errors=True)
+    ok(f"Kode dihapus: {ODIN_INSTALL_DIR}")
+
+    # 4) State (hanya --purge)
+    if purge:
+        cfg = Path.home() / ".ssh" / "config"
+        if cfg.exists():
+            try:
+                lines = [l for l in cfg.read_text().splitlines(keepends=True)
+                         if "Include ~/.odin/ssh_config" not in l]
+                cfg.write_text("".join(lines))
+            except OSError:
+                pass
+        for old in (Path.home() / ".odin_mode",):
+            if old.exists():
+                old.unlink()
+        shutil.rmtree(ODIN_DIR, ignore_errors=True)
+        ok(f"State dihapus: {ODIN_DIR}")
+    else:
+        info(f"State dipertahankan di {ODIN_DIR} — pasang ulang kapan saja: {INSTALL_CMD}")
+
+    print()
+    ok("ODIN di-uninstall dari laptop ini.")
+    info('Baris PATH "~/.local/bin" di shell rc dibiarkan (tak berbahaya).')
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -1890,13 +2299,27 @@ def main() -> None:
                            help="Cabut entry per-workdir lama agar tak ada definisi/hook ganda")
     glob_sub.add_parser("disable", help="Nonaktifkan MCP odin global")
 
-    # update
-    upd_p = sub.add_parser("update", help="Update ODIN di server")
-    upd_p.add_argument("alias", help="Alias server")
+    # setup — satu wizard dari nol sampai siap
+    setup_p = sub.add_parser("setup", help="Wizard lengkap: server → project → Claude Code → verifikasi")
+    setup_p.add_argument("--name", help="Nama project (lewati prompt)")
+    setup_p.add_argument("--remote-root", dest="remote_root", help="Path app di server")
+    setup_p.add_argument("--workdir", help="Workdir lokal (default: cwd)")
 
-    # doctor
-    doc_p = sub.add_parser("doctor", help="Diagnostik server")
-    doc_p.add_argument("alias", help="Alias server")
+    # update (server) / self-update (laptop)
+    upd_p = sub.add_parser("update", help="Update ODIN di SERVER (agent, run.sh, dispatcher)")
+    upd_p.add_argument("alias", help="Alias server")
+    su_p = sub.add_parser("self-update", help="Update ODIN di LAPTOP ini (kode CLI, guard, launcher)")
+    su_p.add_argument("version", nargs="?", help="Tag/branch tujuan (default: rilis terbaru / branch aktif)")
+
+    # doctor: tanpa alias = laptop, dengan alias = server
+    doc_p = sub.add_parser("doctor", help="Diagnostik laptop (tanpa alias) atau server (<alias>)")
+    doc_p.add_argument("alias", nargs="?", help="Alias server (opsional)")
+
+    # uninstall / version
+    un_p = sub.add_parser("uninstall", help="Hapus ODIN dari laptop ini (state dipertahankan)")
+    un_p.add_argument("--purge", action="store_true", help="Hapus juga state: kunci SSH, registry")
+    un_p.add_argument("-y", "--yes", action="store_true", help="Tanpa konfirmasi")
+    sub.add_parser("version", help="Versi, lokasi kode & state")
 
     args = parser.parse_args()
 
@@ -1935,10 +2358,21 @@ def main() -> None:
             cmd_global_disable()
         else:
             glob_p.print_help()
+    elif args.command == "setup":
+        cmd_setup(args)
     elif args.command == "update":
         cmd_update(args.alias)
+    elif args.command == "self-update":
+        cmd_self_update(getattr(args, "version", None))
     elif args.command == "doctor":
-        cmd_doctor(args.alias)
+        if args.alias:
+            cmd_doctor(args.alias)
+        else:
+            cmd_doctor_local()
+    elif args.command == "uninstall":
+        cmd_uninstall(purge=args.purge, yes=args.yes)
+    elif args.command == "version":
+        cmd_version()
     else:
         parser.print_help()
 

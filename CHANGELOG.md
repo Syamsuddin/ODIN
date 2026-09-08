@@ -10,7 +10,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 Rilis perbaikan berdasarkan review keamanan & robustness eksternal atas v2.2.0.
 Semua temuan **Kritis (K1–K5)** dan **Tinggi (T1–T7)** ditutup, plus sebagian besar
-temuan Sedang dan drift dokumentasi. 740 test (dari 699), semuanya lulus.
+temuan Sedang dan drift dokumentasi, plus sistem instalasi baru. 771 test (dari 699), semuanya lulus.
+
+### Added — Sistem instalasi baru (dua perintah dari nol sampai bekerja)
+
+```
+curl -fsSL https://raw.githubusercontent.com/Syamsuddin/ODIN/main/install.sh | bash
+odin setup
+```
+
+- **Kode dan state dipisah.** Kode di `~/.odin/app/` (checkout git), dependensi CLI di
+  `~/.odin/app/.venv/`, wrapper di `~/.odin/bin/odin` + `~/.local/bin/odin`. State
+  (`keys/ servers/ projects/ modes/ ssh_config`) tetap di `~/.odin/` dan **tidak pernah
+  disentuh** installer maupun self-update — menutup akar T6 (dulu `mv ~/.odin` bisa
+  menghilangkan private key). Pengguna ≤ v2.2 dimigrasikan otomatis: hanya file yang
+  dilacak git yang dipindah; symlink `~/.odin/client` & `server` menjaga hook/MCP lama tetap valid.
+- **Tanpa `sudo`.** `~/.local/bin` dipakai alih-alih `/usr/local/bin`; PATH ditambahkan ke
+  rc shell (zsh/bash/fish) dengan izin. Symlink lama `/usr/local/bin/odin{,-update}` dibersihkan.
+- **Versi ter-pin ke tag rilis** (GitHub Releases API, fallback `main`). `--version <ref>` /
+  `ODIN_VERSION` untuk pin manual, `--home`, `--yes`, `--no-setup`. Verifikasi nyata di akhir
+  (`odin --version` + import paramiko/pyyaml). Idempoten: jalankan lagi = update.
+- **`odin setup`** — satu wizard idempoten: server → project (workdir = cwd) → Claude Code
+  (MCP global + hook guard) → verifikasi handshake MCP. Tahap yang sudah beres dilewati.
+- **`odin self-update [ref]`** — perbarui laptop ke tag rilis terbaru (atau ref apa pun,
+  termasuk rollback); dependensi hanya di-install ulang bila `requirements-cli.txt` berubah;
+  slash command ikut diperbarui. Menggantikan `odin-update`.
+- **`odin uninstall [--purge]`** — cabut kode, wrapper, entry MCP, hook guard, allow-list,
+  slash command; state dipertahankan kecuali `--purge` (konfirmasi ganda).
+- **`odin doctor` tanpa alias** — diagnostik laptop: Python, paramiko/pyyaml, git/ssh/claude,
+  tata letak, PATH, MCP global, hook, slash command, server & project (workdir hilang terdeteksi).
+- **`odin version`** — versi + lokasi kode & state.
+- `install.ps1`/`uninstall.ps1` (Windows) ditulis ulang mencerminkan tata letak yang sama
+  (venv, `bin\odin.cmd`, PATH user, junction kompat). Belum diuji di mesin Windows —
+  verifikasi dengan `odin doctor` setelah install.
+- `tests/test_installer.py` (17 test) menjalankan **install.sh sungguhan** terhadap repo lokal
+  (`file://`, HOME sementara): tata letak, wrapper, idempotensi, `--home`, ref tak dikenal,
+  migrasi tata letak lama dengan state utuh; plus unit test setup/self-update/uninstall/doctor.
 
 ### Security — Kritis
 
@@ -145,7 +180,7 @@ temuan Sedang dan drift dokumentasi. 740 test (dari 699), semuanya lulus.
   dan kunci tanpa forced-command.
 - `server/odin-dispatch.sh` — dispatcher forced-command SSH.
 - `odin server remove --purge` — cabut kunci ODIN dari `authorized_keys` server.
-- `tests/test_review_fixes.py` (31 test) — regresi untuk setiap temuan di atas.
+- `tests/test_review_fixes.py` (45 test) — regresi untuk setiap temuan di atas.
 - Env baru: `ODIN_ENV`, `MEMORY_MAX_BYTES`, `MEMORY_DEAD_RATIO`, `LOG_ROTATE_BYTES`,
   `AUDIT_SYSLOG`.
 

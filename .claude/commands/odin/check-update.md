@@ -33,7 +33,7 @@ Jika sudah terbaru:
 Jika ada update:
 
 > ⚠ Update tersedia! Versi lokal: v[lokal], terbaru: v[remote].
-> Jalankan `odin-update` di terminal untuk memperbarui.
+> Jalankan `odin self-update` (laptop) lalu `odin update <alias>` (server) di terminal.
 
 Jika gagal cek (tidak ada internet, dll):
 

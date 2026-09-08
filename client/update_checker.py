@@ -23,7 +23,8 @@ from urllib.error import URLError
 REPO = "Syamsuddin/ODIN"
 CACHE_TTL_HOURS = 6
 INSTALL_DIR = Path(os.environ.get("ODIN_INSTALL_DIR", Path.home() / ".odin"))
-CACHE_FILE = INSTALL_DIR / ".update-cache.json"
+# Cache di state dir (~/.odin), bukan di app/ yang diganti saat self-update.
+CACHE_FILE = Path(os.environ.get("ODIN_HOME", Path.home() / ".odin")) / ".update-cache.json"
 
 NC = "\033[0m"
 GREEN = "\033[0;32m"
@@ -132,8 +133,8 @@ def check_update(quiet: bool = False) -> dict:
             f"{CYAN}v{local}{NC} → {GREEN}v{remote}{NC}\n"
             f"\n"
             f"  Update sekarang:\n"
-            f"    {CYAN}odin-update{NC}\n"
-            f"    {CYAN}curl -fsSL https://raw.githubusercontent.com/{REPO}/main/install.sh | bash{NC}\n"
+            f"    {CYAN}odin self-update{NC}          (laptop)\n"
+            f"    {CYAN}odin update <alias>{NC}       (server)\n"
             f"\n"
             f"  Changelog:\n"
             f"    {CYAN}https://github.com/{REPO}/releases/tag/v{remote}{NC}\n"

@@ -9,10 +9,10 @@
 
 <p align="center">
   <a href="#"><img src="https://img.shields.io/badge/MCP_Tools-20-00bcd4?style=flat-square&logo=lightning&logoColor=white" alt="20 MCP Tools"/></a>
-  <a href="#"><img src="https://img.shields.io/badge/CLI_Commands-12-4caf50?style=flat-square&logo=terminal&logoColor=white" alt="12 CLI Commands"/></a>
-  <a href="#"><img src="https://img.shields.io/badge/Security-4_Layers-e53935?style=flat-square&logo=shield&logoColor=white" alt="4 Security Layers"/></a>
+  <a href="#"><img src="https://img.shields.io/badge/CLI_Commands-20-4caf50?style=flat-square&logo=terminal&logoColor=white" alt="20 CLI Commands"/></a>
+  <a href="#"><img src="https://img.shields.io/badge/Security-5_Layers-e53935?style=flat-square&logo=shield&logoColor=white" alt="5 Security Layers"/></a>
   <a href="#"><img src="https://img.shields.io/badge/Risk_Tiers-5-ff9800?style=flat-square&logo=alert&logoColor=white" alt="5 Risk Tiers"/></a>
-  <a href="#"><img src="https://img.shields.io/badge/Tests-740-9c27b0?style=flat-square&logo=pytest&logoColor=white" alt="740 Tests"/></a>
+  <a href="#"><img src="https://img.shields.io/badge/Tests-771-9c27b0?style=flat-square&logo=pytest&logoColor=white" alt="771 Tests"/></a>
 </p>
 
 <p align="center">
@@ -54,7 +54,7 @@ LAPTOP (Claude Code CLI)                    SERVER(S) (VPS, user: odin)
 │  ├─ project add/list/rm │  per project    │  projects/<name>.conf          │
 │  ├─ project status/sync │                 │  memory/<name>/ (isolated)     │
 │  ├─ project switch      │                 │                                │
-│  └─ update / doctor     │                 │  20 MCP tools                  │
+│  └─ setup/update/doctor │                 │  20 MCP tools                  │
 │                         │                 │  Output intelligence (23)      │
 │  odin_guard.py          │                 │  Rollback tracking             │
 │  ├─ READ/WRITE classify │                 │  Runbook engine + templates    │
@@ -70,7 +70,7 @@ LAPTOP (Claude Code CLI)                    SERVER(S) (VPS, user: odin)
 │  <workdir>/.claude/     │  ← MCP config per project (workdir-based switching)
 │    settings.json        │
 │                         │
-│  ~2940 baris Python     │
+│  ~3583 baris Python     │
 └─────────────────────────┘
 ```
 
@@ -88,11 +88,11 @@ ODIN/
 │   ├── run.sh               # Multi-project launcher: --project <name>
 │   └── odin-dispatch.sh     # Forced-command SSH: kunci ODIN tak memberi shell
 ├── client/
-│   ├── odin_cli.py          # CLI multi-server & multi-project (1739 baris)
+│   ├── odin_cli.py          # CLI multi-server & multi-project (2381 baris)
 │   ├── odin_guard.py        # Risk engine + guard (895 baris) — project-aware
 │   ├── odin_mcp_launch.py   # Launcher MCP global: cwd → project (151 baris)
 │   └── update_checker.py    # Cek versi terbaru (155 baris)
-├── tests/                   # 740 tests across 16 files
+├── tests/                   # 771 tests across 17 files
 │   ├── test_core.py         # (59), test_guard.py (160), test_memory.py (58)
 │   ├── test_memory_improvements.py (42)  # Semantic search, staleness, similarity
 │   ├── test_cortex.py       # (40) — Global consciousness + event journal
@@ -102,11 +102,12 @@ ODIN/
 │   ├── test_fase3.py (36), test_fase3_ux.py (32), test_fase4_proactive.py (38)
 │   ├── test_profile_mode.py (57)
 │   ├── test_guard_multiproject.py (24)  # Project awareness tests
-│   ├── test_review_fixes.py (31)        # Regresi temuan review v2.2
+│   ├── test_review_fixes.py (45)        # Regresi temuan review v2.2
+│   ├── test_installer.py (17)           # install.sh nyata + setup/self-update/uninstall
 │   └── test_cli.py          # (43) — CLI + run.sh + project tests
-├── install.sh               # Installer (macOS & Linux)
-├── install.ps1              # Installer (Windows PowerShell)
-├── uninstall.sh / .ps1
+├── install.sh               # Installer (macOS & Linux) — tanpa sudo, venv, tag rilis
+├── install.ps1              # Installer (Windows PowerShell) — cermin install.sh
+├── uninstall.sh / .ps1      # Pembungkus `odin uninstall` (+ tata letak lama)
 ├── requirements.txt         # Server: mcp[cli]
 ├── requirements-cli.txt     # Laptop CLI: paramiko, pyyaml
 └── CHANGELOG.md
@@ -115,7 +116,7 @@ ODIN/
 Catatan: `CLAUDE.md`, `docs/`, dan dokumen desain internal sengaja di-gitignore —
 clone segar tidak memilikinya, jadi jangan menganggapnya bagian dari struktur repo.
 
-**Total**: ~6734 baris source + ~5000 baris test
+**Total**: ~7382 baris source + ~7031 baris test
 
 ---
 
@@ -224,9 +225,13 @@ ODIN sekarang **tahu dan tampilkan** project aktif di mana-mana:
 | `odin project sync [name] [--all]` | **Baru** — Regenerasi config lokal dari manifest (pemulihan / migrasi) |
 | `odin project remove <name>` | Hapus project config (bersihkan `.claude/settings.json` + `.mcp.json`) |
 | `odin global enable [--migrate]` | Pasang MCP odin di scope-user (server → `~/.claude.json`, hook & allow → `~/.claude/settings.json`) → tersedia otomatis di semua project; `--migrate` cabut entry per-workdir lama |
-| `odin global disable` | **Baru** — Cabut entry MCP odin global |
-| `odin update <alias>` | Update agent + run.sh + dispatcher (backup → compile-check → ganti atomik → handshake MCP) |
-| `odin doctor <alias>` | Diagnostik server + handshake MCP nyata per project (`initialize` + `tools/list`) |
+| `odin global disable` | Cabut entry MCP odin global |
+| `odin setup` | **Baru** — satu wizard: server → project → Claude Code → verifikasi (idempoten) |
+| `odin update <alias>` | Update agent + run.sh + dispatcher di **server** (backup → compile-check → ganti atomik → handshake MCP) |
+| `odin self-update [ref]` | **Baru** — update ODIN di **laptop** ke tag rilis terbaru (atau ref tertentu; rollback pun bisa) |
+| `odin doctor [alias]` | Tanpa alias: diagnostik **laptop**. Dengan alias: server + handshake MCP nyata per project |
+| `odin uninstall [--purge]` | **Baru** — hapus ODIN dari laptop; state (kunci, registry) dipertahankan kecuali `--purge` |
+| `odin version` | **Baru** — versi, lokasi kode & state |
 
 **Registrasi non-interaktif (batch/scripting):**
 
@@ -240,11 +245,11 @@ odin project add --name ekampus --server gibtha_srv \
 
 ### Alur Kerja
 
-1. `odin server add` — setup server (1x per server)
-2. `odin project add` — link workdir ↔ server:project (1x per project)
-3. `cd ~/project && claude` — ODIN otomatis aktif ke server & project yang benar
-4. `/odin:status` — cek project identity + server state
-5. Risk card setiap WRITE operation menampilkan `Prj : <name> → <server>`
+1. `odin setup` — wizard: server (1x per server) → project (1x per project) → Claude Code → verifikasi
+2. `cd ~/project && claude` — ODIN otomatis aktif ke server & project yang benar
+3. `/odin:status` — cek project identity + server state
+4. Risk card setiap WRITE operation menampilkan `Prj : <name> → <server>`
+5. Project berikutnya: `cd ~/project-lain && odin setup` (server yang ada dipakai ulang)
 
 ### Isolasi Per Project
 
@@ -498,63 +503,92 @@ Setiap eksekusi tool dicatat ke `audit.jsonl`: timestamp, tool, summary, success
 
 ## Instalasi
 
-### Installer Otomatis (Rekomendasi)
+Dua perintah dari nol sampai bekerja. Tanpa `sudo`, tanpa mengutak-atik PATH atau
+config Claude Code secara manual.
 
-**macOS & Linux:**
+**macOS & Linux**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Syamsuddin/ODIN/main/install.sh | bash
+odin setup
 ```
 
-**Windows:**
+**Windows (PowerShell)**
 
 ```powershell
 irm https://raw.githubusercontent.com/Syamsuddin/ODIN/main/install.ps1 | iex
+odin setup
 ```
 
-Installer menangani:
+### Apa yang dilakukan installer
 
-1. Download repo ke `~/.odin/`
-2. Install dependensi CLI (`paramiko`, `pyyaml`)
-3. Setup command `odin` di PATH
-4. Setup guard hook
-5. Tanya: "Setup server sekarang?" → `odin server add`
+| Langkah | Detail |
+|---|---|
+| Prasyarat | git, Python ≥ 3.10, ssh. Claude Code CLI dicek (peringatan bila belum ada) |
+| Versi | **Tag rilis terbaru** dari GitHub (bukan `main` HEAD). Pin manual: `ODIN_VERSION=v2.3.0` |
+| Kode | `~/.odin/app/` — checkout git yang bisa diganti versi kapan saja |
+| Dependensi | venv terisolasi di `~/.odin/app/.venv/` — kebal PEP 668 (Debian 12, Ubuntu 23.04+, Homebrew) |
+| Perintah | `~/.odin/bin/odin` + symlink `~/.local/bin/odin`; PATH ditambahkan ke shell rc (dengan izin) |
+| Claude Code | slash command `/odin:*` ke `~/.claude/commands/odin/` |
+| Verifikasi | `odin --version` dan import `paramiko`/`pyyaml` dijalankan sungguhan |
 
-### Setelah Install
+Idempoten: menjalankan installer lagi = update. **Tidak pernah memakai `sudo`.**
+
+Opsi: `--yes` (non-interaktif), `--no-setup`, `--version <ref>`, `--home <dir>`.
+Lewat pipe: `curl … | bash -s -- --yes`. Env setara: `ODIN_VERSION`, `ODIN_HOME`.
+
+### Tata letak di laptop
+
+Kode dan **state dipisah** — installer/self-update tak pernah menyentuh state.
+
+```
+~/.odin/
+├── app/                    kode ODIN (git)  ← odin self-update
+│   └── .venv/              dependensi CLI
+├── bin/odin                wrapper CLI
+├── keys/                   kunci SSH per server        ┐
+├── servers/  projects/     registry                    │ state milik Anda
+├── modes/    ssh_config    mode per project, SSH entry ┘
+└── client/ server/ → app/  symlink kompatibilitas (hook & MCP dari versi lama tetap valid)
+~/.local/bin/odin → ~/.odin/bin/odin
+```
+
+Pengguna ODIN ≤ v2.2 (kode langsung di `~/.odin`): installer memigrasikan otomatis —
+hanya file yang dilacak git yang dipindah, `keys/ servers/ projects/ modes/` utuh.
+
+### `odin setup` — satu wizard
+
+```
+[1/4] Server       → odin server add (user odin, sudoers tervalidasi, venv, agent,
+                     kunci forced-command, handshake MCP)   — dilewati bila sudah ada
+[2/4] Project      → odin project add (workdir = folder saat ini) — dilewati bila terdaftar
+[3/4] Claude Code  → MCP odin global (rekomendasi) + hook guard + allow-list
+[4/4] Verifikasi   → handshake MCP nyata ke project ini
+      → cd <workdir> && claude
+```
+
+Aman dijalankan berulang: tahap yang sudah beres dilewati.
+
+### Perintah pemeliharaan
 
 ```bash
-# 1. Setup server (1x per server)
-odin server add
-
-# 2. Tambah project (1x per project) — interaktif
-odin project add
-#    ...atau non-interaktif (batch):
-#    odin project add --name simuru --server vps-app \
-#        --remote-root /var/www/simuru --workdir ~/PROJECTS/SIMURU --yes
-
-# 3. Mulai bekerja
-cd ~/PROJECTS/SIMURU && claude
-
-# 4. Cek project identity
-/odin:status
-
-# 5. Validasi project config
-odin project status
-
-# 6. Switch ke project lain
-odin project switch <name>
-
-# 7. Regenerasi config lokal (mis. setelah repo ODIN dipindah)
-odin project sync --all
+odin doctor               # laptop: python, deps, PATH, MCP global, hook, server & project
+odin doctor <alias>       # server: file, venv, sudoers, kunci, handshake MCP per project
+odin self-update          # perbarui ODIN di LAPTOP (tag rilis terbaru; atau: odin self-update v2.4.0)
+odin update <alias>       # perbarui agent di SERVER (backup → compile-check → atomik → handshake)
+odin server harden <alias>   # server lama: sudoers aman + kunci forced-command
+odin version              # versi + lokasi kode & state
 ```
 
 ### Uninstall
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Syamsuddin/ODIN/main/uninstall.sh | bash
+odin uninstall            # hapus kode, wrapper, entry Claude Code — state DIPERTAHANKAN
+odin uninstall --purge    # hapus juga kunci SSH & registry
 ```
 
-Windows: `irm https://raw.githubusercontent.com/Syamsuddin/ODIN/main/uninstall.ps1 | iex`
+Sebelum `--purge`, cabut kunci dari server dulu: `odin server remove <alias> --purge`.
+Bila CLI sudah rusak: `curl -fsSL …/uninstall.sh | bash` (Windows: `…/uninstall.ps1 | iex`).
 
 ---
 
@@ -606,7 +640,7 @@ Total waktu: < 2 menit. Intervensi user: 1x approve restart MySQL.
 ## Testing
 
 ```bash
-python3 -m pytest tests/ -v          # full test suite (740 tests)
+python3 -m pytest tests/ -v          # full test suite (771 tests)
 python3 -m py_compile server/odin_agent.py
 python3 -m py_compile client/odin_guard.py
 python3 -m py_compile client/odin_cli.py
@@ -649,9 +683,9 @@ Auto-detect juga mendukung: PostgreSQL, MongoDB, Docker, Apache, Redis, Supervis
 
 | Metrik | Nilai |
 |--------|-------|
-| Total kode | **~6734 baris** (server 3794 + cli 1739 + guard 895 + launcher 151 + updater 155) |
-| Total test | **740 automated tests, 16 files** |
-| CLI commands | 15 (termasuk `server harden`, `project sync`, `global enable/disable`) |
+| Total kode | **~7382 baris** (server 3799 + cli 2381 + guard 895 + launcher 151 + updater 156) |
+| Total test | **771 automated tests, 17 files** |
+| CLI commands | 20 (termasuk `setup`, `self-update`, `uninstall`, `doctor` laptop, `server harden`) |
 | Dependensi server | 1 (`mcp[cli]`) |
 | Dependensi laptop CLI | 2 (`paramiko`, `pyyaml`) |
 | MCP tools | **20** (termasuk cortex_log, cortex_events, memory_health) |

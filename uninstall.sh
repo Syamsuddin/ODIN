@@ -1,194 +1,113 @@
 #!/usr/bin/env bash
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # ODIN Uninstaller — macOS & Linux
-# Usage: curl -fsSL https://raw.githubusercontent.com/Syamsuddin/ODIN/main/uninstall.sh | bash
+#
+#   curl -fsSL https://raw.githubusercontent.com/Syamsuddin/ODIN/main/uninstall.sh | bash
+#   curl -fsSL .../uninstall.sh | bash -s -- --purge     # hapus juga kunci & registry
+#   curl -fsSL .../uninstall.sh | bash -s -- --yes       # tanpa konfirmasi
+#
+# Normalnya cukup `odin uninstall` — skrip ini hanya pembungkus yang juga bisa
+# membersihkan tata letak lama (ODIN <= v2.2, kode langsung di ~/.odin).
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 set -euo pipefail
 
-# ── TTY untuk input interaktif (penting saat `curl | bash`) ────────────────
-# Tanpa ini `read -r` membaca sisa skrip dari pipe (atau EOF) dan, di bawah
-# `set -e`, uninstall langsung berhenti.
-if [ -t 0 ]; then
-    TTY_FD=0
-else
-    exec 3</dev/tty 2>/dev/null || { echo "ERROR: Tidak bisa membuka /dev/tty." >&2; exit 1; }
-    TTY_FD=3
-fi
-
-INSTALL_DIR="${ODIN_INSTALL_DIR:-$HOME/.odin}"
-BIN_LINK="/usr/local/bin/odin-update"
-CLAUDE_JSON="$HOME/.claude.json"
-GLOBAL_SETTINGS="$HOME/.claude/settings.json"
-ODIN_MODE_FILE="$HOME/.odin_mode"
-
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-
-info()  { printf "${BLUE}▸${NC} %s\n" "$*"; }
-ok()    { printf "${GREEN}✓${NC} %s\n" "$*"; }
-warn()  { printf "${YELLOW}⚠${NC} %s\n" "$*"; }
-
-PYTHON=""
-for candidate in python3 python; do
-    if command -v "$candidate" >/dev/null 2>&1; then
-        PYTHON="$candidate"
-        break
-    fi
+ODIN_HOME="${ODIN_HOME:-$HOME/.odin}"
+PURGE=0; YES=0
+for a in "$@"; do
+    case "$a" in
+        --purge) PURGE=1 ;;
+        -y|--yes) YES=1 ;;
+        *) echo "Argumen tak dikenal: $a" >&2; exit 2 ;;
+    esac
 done
 
-printf "\n${BOLD}${CYAN}  ODIN Uninstaller${NC}\n\n"
+GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; BLUE='\033[0;34m'; NC='\033[0m'
+info() { printf "${BLUE}▸${NC} %s\n" "$*"; }
+ok()   { printf "${GREEN}✓${NC} %s\n" "$*"; }
+warn() { printf "${YELLOW}⚠${NC} %s\n" "$*"; }
+err()  { printf "${RED}✗${NC} %s\n" "$*" >&2; }
 
-if [ ! -d "$INSTALL_DIR" ]; then
-    warn "ODIN tidak ditemukan di $INSTALL_DIR — tidak ada yang perlu dihapus."
+# ── Jalur normal: CLI v2.3+ punya `odin uninstall` ──────────────────────────
+if [ -x "$ODIN_HOME/bin/odin" ]; then
+    args=()
+    [ "$PURGE" = 1 ] && args+=(--purge)
+    [ "$YES" = 1 ] && args+=(--yes)
+    if [ -t 0 ]; then
+        exec "$ODIN_HOME/bin/odin" uninstall "${args[@]}"
+    elif [ "$YES" = 1 ]; then
+        exec "$ODIN_HOME/bin/odin" uninstall "${args[@]}" </dev/null
+    else
+        exec "$ODIN_HOME/bin/odin" uninstall "${args[@]}" </dev/tty
+    fi
+fi
+
+# ── Jalur lama: kode langsung di ~/.odin (ODIN <= v2.2) ─────────────────────
+if [ ! -d "$ODIN_HOME" ]; then
+    warn "ODIN tidak ditemukan di $ODIN_HOME — tidak ada yang dihapus."
     exit 0
 fi
 
-printf "${YELLOW}Ini akan menghapus:${NC}\n"
-printf "  • ${CYAN}%s${NC} (source, venv, seluruh isi)\n" "$INSTALL_DIR"
-printf "  • ${CYAN}%s${NC} (symlink, jika ada)\n" "$BIN_LINK"
-[ -f "$ODIN_MODE_FILE" ] && printf "  • ${CYAN}%s${NC}\n" "$ODIN_MODE_FILE"
-printf "  • Entry ${CYAN}mcpServers.odin${NC} dari ~/.claude.json\n"
-printf "  • Hook ${CYAN}mcp__odin__${NC} dari settings.json\n"
+printf "\n  ODIN Uninstaller (tata letak lama)\n\n"
+printf "  Akan dihapus:\n"
+printf "    • kode ODIN di %s (state keys/servers/projects %s)\n" "$ODIN_HOME" \
+       "$([ "$PURGE" = 1 ] && echo 'IKUT DIHAPUS' || echo 'dipertahankan')"
+printf "    • symlink /usr/local/bin/odin, /usr/local/bin/odin-update\n"
+printf "    • entry mcpServers.odin di ~/.claude.json; hook & allow ODIN di ~/.claude/settings.json\n\n"
+if [ "$YES" != 1 ]; then
+    if [ -t 0 ]; then read -r -p "  Lanjutkan? [y/N] " ans; else read -r -p "  Lanjutkan? [y/N] " ans </dev/tty; fi
+    case "$ans" in [Yy]*) ;; *) info "Dibatalkan."; exit 0 ;; esac
+fi
+
+PY="$(command -v python3 || command -v python || true)"
+if [ -n "$PY" ]; then
+    "$PY" - <<'PYEOF' && ok "Config Claude Code dibersihkan" || true
+import json, os
+from pathlib import Path
+home = Path.home()
+cj = home / ".claude.json"
+if cj.exists():
+    try:
+        d = json.loads(cj.read_text())
+        if "odin" in (d.get("mcpServers") or {}):
+            d["mcpServers"].pop("odin")
+            cj.write_text(json.dumps(d, indent=2) + "\n")
+    except Exception:
+        pass
+sp = home / ".claude" / "settings.json"
+if sp.exists():
+    try:
+        s = json.loads(sp.read_text())
+        (s.get("mcpServers") or {}).pop("odin", None)
+        for ev, lst in list((s.get("hooks") or {}).items()):
+            s["hooks"][ev] = [h for h in lst if not str((h or {}).get("matcher", "")).startswith("mcp__odin__")]
+        allow = (s.get("permissions") or {}).get("allow")
+        if isinstance(allow, list):
+            s["permissions"]["allow"] = [a for a in allow if not str(a).startswith("mcp__odin__")]
+        sp.write_text(json.dumps(s, indent=2) + "\n")
+    except Exception:
+        pass
+PYEOF
+fi
+rm -rf "$HOME/.claude/commands/odin" 2>/dev/null || true
+
+for link in /usr/local/bin/odin /usr/local/bin/odin-update; do
+    if [ -L "$link" ]; then
+        rm -f "$link" 2>/dev/null && ok "$link dihapus" || warn "Hapus manual: sudo rm $link"
+    fi
+done
+
+if [ "$PURGE" = 1 ]; then
+    rm -rf "$ODIN_HOME" "$HOME/.odin_mode"
+    ok "$ODIN_HOME dihapus seluruhnya (termasuk kunci SSH)"
+else
+    if [ -d "$ODIN_HOME/.git" ]; then
+        git -C "$ODIN_HOME" ls-files -z 2>/dev/null | while IFS= read -r -d '' f; do rm -f "$ODIN_HOME/$f"; done
+        rm -rf "$ODIN_HOME/.git" "$ODIN_HOME/.venv" "$ODIN_HOME/client" "$ODIN_HOME/server" \
+               "$ODIN_HOME/tests" "$ODIN_HOME/odin-update.sh" "$ODIN_HOME/odin-cli.sh" 2>/dev/null || true
+        ok "Kode dihapus; state di $ODIN_HOME dipertahankan (keys/servers/projects/modes)"
+    else
+        warn "$ODIN_HOME bukan checkout git — tidak ada kode yang dikenali; state dibiarkan."
+    fi
+fi
 printf "\n"
-printf "${BOLD}Lanjutkan? [y/N]${NC} "
-read -r confirm <&"$TTY_FD"
-if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-    info "Dibatalkan."
-    exit 0
-fi
-
-# ── Hapus direktori ODIN ───────────────────────────────────────────────────
-info "Menghapus $INSTALL_DIR..."
-rm -rf "$INSTALL_DIR"
-ok "Direktori ODIN dihapus"
-
-# ── Hapus symlink ──────────────────────────────────────────────────────────
-if [ -L "$BIN_LINK" ]; then
-    if [ -w "$(dirname "$BIN_LINK")" ] 2>/dev/null; then
-        rm -f "$BIN_LINK"
-    else
-        sudo rm -f "$BIN_LINK" 2>/dev/null || true
-    fi
-    ok "Symlink $BIN_LINK dihapus"
-fi
-
-# ── Hapus ~/.odin_mode ─────────────────────────────────────────────────────
-if [ -f "$ODIN_MODE_FILE" ]; then
-    rm -f "$ODIN_MODE_FILE"
-    ok "$ODIN_MODE_FILE dihapus"
-fi
-
-# ── Bersihkan ~/.claude.json (hapus mcpServers.odin) ───────────────────────
-if [ -n "$PYTHON" ] && [ -f "$CLAUDE_JSON" ]; then
-    info "Membersihkan mcpServers.odin dari ~/.claude.json..."
-    if "$PYTHON" -c "
-import json, sys
-try:
-    with open('$CLAUDE_JSON') as f:
-        data = json.load(f)
-    mcp = data.get('mcpServers', {})
-    removed = []
-    if 'odin' in mcp:
-        del mcp['odin']
-        removed.append('odin')
-    if removed:
-        with open('$CLAUDE_JSON', 'w') as f:
-            json.dump(data, f, indent=2)
-            f.write('\n')
-        print(','.join(removed))
-    else:
-        sys.exit(1)
-except Exception:
-    sys.exit(1)
-" 2>/dev/null; then
-        ok "mcpServers.odin dihapus dari ~/.claude.json"
-    else
-        info "mcpServers.odin tidak ditemukan — skip"
-    fi
-else
-    [ ! -f "$CLAUDE_JSON" ] && info "~/.claude.json tidak ada — skip"
-fi
-
-# ── Bersihkan settings.json (hapus hook & permissions odin) ────────────────
-clean_settings() {
-    local settings_path="$1"
-    [ ! -f "$settings_path" ] && return 1
-    [ -z "$PYTHON" ] && return 1
-
-    "$PYTHON" -c "
-import json, sys
-try:
-    with open('$settings_path') as f:
-        data = json.load(f)
-    changed = False
-
-    # Hapus permissions odin
-    perms = data.get('permissions', {})
-    allow = perms.get('allow', [])
-    new_allow = [p for p in allow if not p.startswith('mcp__odin__')]
-    if len(new_allow) != len(allow):
-        perms['allow'] = new_allow
-        changed = True
-
-    # Hapus hooks odin (PreToolUse + PostToolUse)
-    hooks = data.get('hooks', {})
-    for event in ('PreToolUse', 'PostToolUse'):
-        lst = hooks.get(event, [])
-        new_lst = [h for h in lst if not (isinstance(h, dict) and 'mcp__odin__' in h.get('matcher', ''))]
-        if len(new_lst) != len(lst):
-            hooks[event] = new_lst
-            changed = True
-
-    if changed:
-        with open('$settings_path', 'w') as f:
-            json.dump(data, f, indent=2)
-            f.write('\n')
-        sys.exit(0)
-    else:
-        sys.exit(1)
-except Exception:
-    sys.exit(1)
-" 2>/dev/null
-}
-
-info "Membersihkan hook & permissions odin dari settings.json..."
-cleaned=false
-if clean_settings "$GLOBAL_SETTINGS"; then
-    ok "Global settings (~/.claude/settings.json) dibersihkan"
-    cleaned=true
-fi
-
-# Cari project settings.json yang mungkin ada
-for proj_settings in "$HOME"/.claude/projects/*/settings.json; do
-    [ -f "$proj_settings" ] || continue
-    if clean_settings "$proj_settings"; then
-        ok "Project settings ($proj_settings) dibersihkan"
-        cleaned=true
-    fi
-done
-
-if [ "$cleaned" = false ]; then
-    info "Tidak ada hook/permissions odin ditemukan — skip"
-fi
-
-# ── Tawarkan cleanup server ────────────────────────────────────────────────
-printf "\n${BOLD}Hapus ODIN dari server juga? [y/N]${NC} "
-read -r do_server <&"$TTY_FD"
-if [[ "$do_server" =~ ^[Yy]$ ]]; then
-    printf "\n"
-    printf "  ${BOLD}SSH user@host${NC} server (contoh: root@192.168.1.100): "
-    read -r server_host <&"$TTY_FD"
-    if [ -n "$server_host" ]; then
-        info "Menghubungi $server_host..."
-        if ssh -o ConnectTimeout=10 "$server_host" \
-            "rm -rf /home/odin/odin_agent.py /home/odin/run.sh /home/odin/.venv /home/odin/memory" 2>/dev/null; then
-            ok "File ODIN di server dihapus"
-            printf "    ${YELLOW}⚠${NC} User odin masih ada — hapus manual: ${CYAN}sudo userdel -r odin${NC}\n"
-        else
-            warn "Gagal menghapus — hapus manual di server:"
-            printf "    ${CYAN}rm -rf /home/odin/odin_agent.py /home/odin/run.sh /home/odin/.venv /home/odin/memory${NC}\n"
-        fi
-    fi
-fi
-
-printf "\n${GREEN}✓ ODIN berhasil di-uninstall.${NC}\n\n"
+ok "ODIN di-uninstall dari laptop ini. Server tidak disentuh."
