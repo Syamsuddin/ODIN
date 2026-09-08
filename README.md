@@ -9,7 +9,7 @@
 
 <p align="center">
   <a href="#"><img src="https://img.shields.io/badge/MCP_Tools-20-00bcd4?style=flat-square&logo=lightning&logoColor=white" alt="20 MCP Tools"/></a>
-  <a href="#"><img src="https://img.shields.io/badge/CLI_Commands-20-4caf50?style=flat-square&logo=terminal&logoColor=white" alt="20 CLI Commands"/></a>
+  <a href="#"><img src="https://img.shields.io/badge/CLI_Commands-19-4caf50?style=flat-square&logo=terminal&logoColor=white" alt="19 CLI Commands"/></a>
   <a href="#"><img src="https://img.shields.io/badge/Security-5_Layers-e53935?style=flat-square&logo=shield&logoColor=white" alt="5 Security Layers"/></a>
   <a href="#"><img src="https://img.shields.io/badge/Risk_Tiers-5-ff9800?style=flat-square&logo=alert&logoColor=white" alt="5 Risk Tiers"/></a>
   <a href="#"><img src="https://img.shields.io/badge/Tests-771-9c27b0?style=flat-square&logo=pytest&logoColor=white" alt="771 Tests"/></a>
@@ -23,6 +23,35 @@
   <i>Perintah natural-language dari manusia &#8594; Claude Code memahami intent &#8594; ODIN mengeksekusi di server &#8594; analisis &#8594; ulangi sampai selesai.</i>
 </p>
 
+
+---
+
+## Yang Baru di v2.3
+
+Rilis ini menutup **seluruh temuan Kritis & Tinggi** dari review keamanan eksternal
+atas v2.2, lalu mengganti sistem instalasinya.
+
+**Keamanan** — tiga kebocoran yang bisa direproduksi, kini tertutup:
+
+| | Sebelum | Sekarang |
+|---|---|---|
+| Sudoers `tail -n * /var/log/*` | `sudo tail -n 1 /var/log/../../etc/shadow` membaca shadow sebagai root (fnmatch tanpa `FNM_PATHNAME`) | Aturan dihapus; `journalctl` wajib `--no-pager`; `certbot renew` tanpa argumen bebas; sudoers divalidasi `visudo -cf` + rollback |
+| Kunci SSH `odin` | shell interaktif penuh — pager root jadi jalan eskalasi | `restrict,command="odin-dispatch.sh"` — kunci **hanya** bisa meluncurkan `run.sh [--project <nama>]` |
+| Guard: `env rm -rf /var/www/app` | lolos sebagai READ, **dieksekusi tanpa konfirmasi** | pembungkus di-unwrap → dinilai sebagai `rm`; `<(`/`>(` dan `sed --in-place` ikut tertutup |
+| Hook `.claude/settings.json` | `project add` **menimpa** hook `Bash` milik user | di-merge per-matcher |
+
+**Robustness** — lima bug yang menggigit pemakaian harian:
+
+- Timeout kini membunuh **seluruh process group** — `composer install`/`npm ci` tak lagi jadi orphan; output non-UTF-8 tak lagi dilaporkan `ERROR`
+- Inspeksi startup pindah ke **thread latar** — handshake MCP tak lagi kehabisan waktu (batas 30 detik Claude Code)
+- Mode `production` hanya dari **sinyal eksplisit** (`APP_ENV`/`ODIN_ENV`) — VPS staging berumur 8 hari tak lagi kehilangan `laravel_deploy`
+- Singleton memverifikasi PID sebagai proses ODIN sebelum mengirim sinyal
+- Cache READ diinvalidasi oleh perintah WRITE; `tail_log` tak lagi sukses palsu
+
+**Instalasi** — dua perintah, tanpa `sudo`, kode & state dipisah. Lihat [Instalasi](#instalasi).
+
+> **Sudah memakai ODIN ≤ v2.2?** Perbaikan sudoers **tidak** sampai otomatis ke server
+> yang sudah terpasang. Jalankan `odin update <alias>` lalu **`odin server harden <alias>`**.
 
 ---
 
@@ -49,26 +78,26 @@
 ```
 LAPTOP (Claude Code CLI)                    SERVER(S) (VPS, user: odin)
 ┌─────────────────────────┐                 ┌────────────────────────────────┐
-│  odin_cli.py            │  SSH stdio MCP  │  odin_agent.py (shared)        │
-│  ├─ server add/list/rm  │ ──────────────▶ │  run.sh --project <name>       │
-│  ├─ project add/list/rm │  per project    │  projects/<name>.conf          │
-│  ├─ project status/sync │                 │  memory/<name>/ (isolated)     │
-│  ├─ project switch      │                 │                                │
-│  └─ setup/update/doctor │                 │  20 MCP tools                  │
+│  odin_cli.py            │                 │  odin-dispatch.sh (forced-cmd) │
+│  ├─ setup (wizard)      │  SSH stdio MCP  │    └─ run.sh --project <name>  │
+│  ├─ server add/…/harden │ ──────────────▶ │  odin_agent.py (shared)        │
+│  ├─ project add/…/sync  │  per project    │  projects/<name>.conf          │
+│  ├─ global enable       │                 │  memory/<name>/ (isolated)     │
+│  └─ update / self-update│                 │                                │
+│     doctor / uninstall  │                 │  20 MCP tools                  │
 │                         │                 │  Output intelligence (23)      │
 │  odin_guard.py          │                 │  Rollback tracking             │
 │  ├─ READ/WRITE classify │                 │  Runbook engine + templates    │
 │  ├─ Risk engine (5 tier)│                 │  Server profiler + modes       │
 │  ├─ Per-project mode    │                 │  Audit log + watchdog          │
 │  ├─ Project identity UI │                 │                                │
-│  └─ Kartu risiko + warn │                 │  3794 baris Python             │
+│  └─ Kartu risiko + warn │                 │  3799 baris Python             │
 │                         │                 └────────────────────────────────┘
 │  ~/.odin/               │
-│  ├─ servers/ keys/      │
-│  ├─ projects/ modes/    │
-│                         │
-│  <workdir>/.claude/     │  ← MCP config per project (workdir-based switching)
-│    settings.json        │
+│  ├─ app/   kode + venv  │   ← odin self-update
+│  ├─ bin/odin  (wrapper) │   → ~/.local/bin/odin
+│  ├─ keys/ servers/      │   ┐
+│  └─ projects/ modes/    │   ┘ state — tak disentuh installer
 │                         │
 │  ~3583 baris Python     │
 └─────────────────────────┘
@@ -240,8 +269,12 @@ odin project add --name ekampus --server gibtha_srv \
     --remote-root /var/www/ekampus --workdir ~/PROJECTS/eKAMPUS --yes
 ```
 
-> Config lokal kanonik adalah `.claude/settings.json`. `project add`/`sync` otomatis
-> memigrasikan entry `odin` dari `.mcp.json` format lama agar tidak ada definisi MCP ganda.
+> **Dua mode config.** `odin global enable` (dipilih `odin setup` secara default) memasang
+> SATU entry MCP di `~/.claude.json`; project diresolusi dari cwd saat spawn oleh
+> `odin_mcp_launch.py`, sehingga project baru tak perlu config per-repo. Alternatifnya
+> config per-workdir di `.claude/settings.json`. Keduanya di-hook oleh guard dengan matcher
+> `mcp__odin__.*` — hook milik user di-merge, tidak ditimpa. Entry `odin` dari `.mcp.json`
+> format lama otomatis dimigrasikan agar tidak ada definisi MCP ganda.
 
 ### Alur Kerja
 
@@ -256,12 +289,12 @@ odin project add --name ekampus --server gibtha_srv \
 - **Memory**: `memory/<project>/` di server (terpisah)
 - **Audit log**: per project
 - **Mode operasi**: `~/.odin/modes/<project>` di laptop
-- **MCP config**: `<workdir>/.claude/settings.json` (auto-generated)
+- **MCP config**: `~/.claude.json` (global, rekomendasi — project diresolusi dari cwd) atau `<workdir>/.claude/settings.json` (per-workdir)
 - **Project identity**: di-export via `PROJECT_NAME` env var dari `.conf` ke agent
 
 ---
 
-## Model Keamanan — 4 Lapis Defense-in-Depth
+## Model Keamanan — 5 Lapis Defense-in-Depth
 
 ```
 Lapis 1: READ/WRITE Classifier (client — odin_guard.py)
@@ -341,12 +374,14 @@ Cmd   : rm -rf /tmp/cache
 
 ### Perlindungan Tambahan
 
-- **Command substitution** (`$()` dan backtick) di-detect dan di-force ke "ask" — mencegah bypass via subshell
+- **Perintah pembungkus di-unwrap** (v2.3): `env`, `nice`, `nohup`, `timeout`, `stdbuf`, `setsid`, `xargs`, `command` dilewati beserta flag & `VAR=val`-nya — `env rm -rf /x` dinilai sebagai `rm`, bukan sebagai `env`
+- **Command & process substitution** (`$()`, backtick, `<(`, `>(`) di-force ke "ask" — mencegah bypass via subshell
+- **Normalisasi flag** (v2.3): `rm -fr`, `rm -f -r`, `rm --recursive --force` semuanya dikenali sebagai `rm -rf` sebelum pencocokan pola katastrofik — fungsi ini ada di **kedua sisi** dan harus tetap sama
 - **Secret detection** di memory: password, token, private key, JWT, AWS key ditolak masuk JSONL
 - **Memory di luar webroot**: tidak bisa diakses via web, tidak ikut `git reset --hard` saat deploy
-- **Audit trail**: setiap eksekusi tercatat append-only dengan `project` field — untuk forensik pasca-insiden
+- **Audit trail**: setiap eksekusi tercatat append-only dengan `project` field, **dicerminkan ke journald** (v2.3) — `audit.jsonl` milik user `odin` dan bisa di-truncate lewat `run_command` yang sama, jadi forensik butuh sumber kedua
 - **Production mode**: tier risiko naik 1 level + warning `MODE PRODUCTION` di kartu risiko
-- **Project identity everywhere**: setiap risk card, service card, dan `/odin:status` menampilkan project name
+- **Project identity everywhere**: setiap risk card, service card, dan `/odin:status` menampilkan project name — pada konfigurasi MCP global, project diresolusi dari `~/.odin/projects` (v2.3)
 
 ---
 
@@ -389,18 +424,29 @@ Sebelum `laravel_deploy`, otomatis cek: disk (blokir jika >= 95%), git dirty fil
 
 ### Server Profiler & Mode Operasi
 
-Pada startup, ODIN menjalankan inspeksi penuh:
+Pipeline inspeksi:
 1. **Base inspection** — OS, kernel, uptime, disk, memory, firewall, fail2ban, SSH, cron, users
 2. **Type detection** — klasifikasi: `web-app`, `database`, `container`, `general`
 3. **Stack inspection** — per-type: web (nginx/PHP/FPM/composer/DB/Redis/SSL), database (MySQL/PG/Mongo), container (Docker/compose)
-4. **App inspection** — .env, vendor, framework detection, git state
-5. **Mode derivation** — otomatis: `setup` / `deploy` / `production`
+4. **App inspection** — .env (termasuk `APP_ENV`), vendor, framework detection, git state
+5. **Mode derivation** — `setup` / `deploy` / `production`
 
-**Cache startup**: jika `server:stack-profile` memory < 1 jam, skip full inspection — load mode dan type dari cache.
+**Startup tidak pernah memblokir handshake MCP** (v2.3). Profil cache < 1 jam dipakai
+langsung; bila tidak ada, inspeksi dijadwalkan di **thread latar** dan sesi langsung hidup
+dengan mode `deploy`. Sebelumnya inspeksi berjalan saat import — empat perintah serial
+dengan timeout 30+15+30+15 detik, jauh di atas batas koneksi MCP Claude Code (30 detik),
+sehingga server bisa gagal connect tanpa pesan jelas. `inspect_server` tetap sinkron
+saat dipanggil manual.
+
+**Mode `production` hanya dari sinyal EKSPLISIT** (v2.3): `APP_ENV=production|prod|live`
+di `.env` aplikasi, atau `ODIN_ENV=production`, atau override memory `server:mode-override`.
+Uptime dan disk **bukan** sinyal lingkungan — aturan lama (`uptime > 7 hari && disk < 80%`)
+membuat VPS staging yang hidup 8 hari otomatis jadi `production`, kehilangan
+`laravel_deploy` dan `apt/npm/pip install`, dan keputusan itu di-cache 1 jam.
 
 **Mode enforcement** (dual layer):
-- **Server** (`_mode_gate`): production mode memblokir `laravel_deploy` dan package-install commands
-- **Guard** (`_shift_tier`): production mode menaikkan tier risiko +1 level
+- **Server** (`_mode_gate`): production memblokir `laravel_deploy` dan package-install — pola menoleransi flag sebelum sub-perintah, jadi `apt -y install` ikut terblokir
+- **Guard** (`_shift_tier`): production menaikkan tier risiko +1 level
 
 **Mode per project**: disimpan di `~/.odin/modes/<project>` dan auto-sync via PostToolUse hook saat `inspect_server`.
 
@@ -423,7 +469,14 @@ Pada startup, ODIN menjalankan inspeksi penuh:
 - Deploy/runbook sukses → auto-save pattern ke `server:last-successful-deploy`
 - Error frequency bertahan lintas sesi via `server:error-freq`
 
-Storage: append-only JSONL + fold (last-write-wins, tombstone, TTL), compaction otomatis, di luar webroot
+**Storage**: append-only JSONL + fold (last-write-wins, tombstone, TTL), di luar webroot.
+
+Compaction (v2.3) dipicu oleh **rasio record mati** (> 50%) atau **ukuran berkas** (> 8 MB),
+bukan lagi jumlah entry hidup — pemicu lama tak pernah tercapai lewat upsert (id-nya tetap,
+hanya versi lamanya menumpuk), sehingga histori mati tumbuh tanpa batas. Penulisan ulang
+memakai `mkstemp` di direktori yang sama di bawah `flock`. `audit.jsonl` & `events.jsonl`
+dirotasi pada 5 MB. Fold cache diinvalidasi lintas-proses lewat `(mtime, size)` — sesi A
+kini melihat instruksi baru yang ditulis sesi B.
 
 ### Orchestrator — Sistem Saraf Otonom
 
@@ -494,6 +547,19 @@ Sesi 1: Error db_conn 3x → ODIN auto-save lesson
 Sesi 2: Error db_conn lagi → Orchestrator auto-recall lesson → 
         Claude: "Saya ingat masalah ini. Cek MySQL dulu." → langsung fix
 ```
+
+### Ketahanan Eksekusi (v2.3)
+
+| Masalah | Perbaikan |
+|---|---|
+| Timeout hanya membunuh wrapper `bash` — `composer install`/`npm ci` terus jalan sebagai orphan | `Popen(start_new_session=True)` + `killpg` **seluruh process group** saat timeout |
+| Output non-UTF-8 (mysqldump, git log latin1) melempar `UnicodeDecodeError` → dilaporkan `ERROR` dengan `stdout=""` padahal perintah sukses | dekode dengan `errors="replace"` |
+| `capture_output` menampung output tak terbatas di RAM sebelum dipotong | dialirkan ke buffer **head/tail terbatas** |
+| `cat f` → `sed -i` → `cat f` mengembalikan isi lama selama 60 detik | cache READ diinvalidasi oleh setiap perintah WRITE |
+| `tail <file-hilang> \| grep x \|\| true` exit 0 → sukses palsu | `PIPESTATUS` memisahkan kegagalan `tail` dari grep-tanpa-hasil |
+| `tail` yang sukses selalu exit 0 → deteksi SQLSTATE tak pernah terpicu | analisis pola error dijalankan pada **isi log**, bukan hanya saat exit ≠ 0 |
+| Crash di tengah tulis menyisakan baris tanpa `\n` → record berikutnya ikut gugur | append memeriksa byte terakhir dan menyisipkan `\n` bila perlu |
+| Singleton mengirim SIGKILL 1,5 detik setelah SIGTERM ke PID dari file yang selamat dari reboot | PID diverifikasi sebagai proses `odin_agent.py`; SIGTERM ditunggu sampai ~15 detik |
 
 ### Audit Log
 
@@ -629,36 +695,59 @@ Total waktu: < 2 menit. Intervensi user: 1x approve restart MySQL.
 | `MAX_TIMEOUT` | `900` | Timeout maksimum (detik) |
 | `OUTPUT_LIMIT` | `20000` | Potong output panjang (karakter) |
 | `AGENT_LOG_LEVEL` | `INFO` | Level log |
+| `ODIN_ENV` | — | **Baru** — `production`/`prod`/`live` → mode production (sinyal eksplisit) |
+| `CACHE_TTL_READ` | `60` | TTL cache hasil perintah READ (detik); `0` = matikan |
+| `CONTEXT_BUDGET` | `5000` | Ambang pemotongan output ke head/tail (karakter) |
 | `MEMORY_DIR` | `$ODIN_HOME/memory/<project>` (di-set `run.sh`) | Folder simpanan memory |
 | `MEMORY_MAX_TEXT` | `4000` | Panjang maks teks satu entry |
-| `MEMORY_MAX_ENTRIES` | `2000` | Ambang compaction |
+| `MEMORY_MAX_ENTRIES` | `2000` | Ambang compaction (jumlah entry hidup) |
+| `MEMORY_MAX_BYTES` | `8388608` | **Baru** — ukuran berkas pemicu compaction |
+| `MEMORY_DEAD_RATIO` | `0.5` | **Baru** — rasio record mati pemicu compaction |
+| `STALE_DAYS` | `30` | Umur entry sebelum ditandai `[STALE?]` |
+| `DIGEST_BUDGET` | `3000` | Batas karakter memory digest saat startup |
+| `EVENTS_DIGEST_HOURS` | `24` | Jendela cross-project event di digest |
+| `LOG_ROTATE_BYTES` | `5242880` | **Baru** — rotasi `audit.jsonl` & `events.jsonl` |
 | `AUDIT_ENABLED` | `1` | `0` = matikan audit log |
+| `AUDIT_SYSLOG` | `1` | **Baru** — `0` = jangan cermin audit ke journald |
+| `SERVER_ID` | — | machine-id server (di-seed `run.sh`) — anti mis-route |
 | `ODIN_SKIP_INSPECT` | `0` | `1` = skip startup inspection (untuk testing) |
+
+Sisi laptop (dipakai installer & CLI): `ODIN_HOME` (default `~/.odin`),
+`ODIN_VERSION` (tag/branch yang dipasang), `ODIN_INSTALL_DIR` (kode, default `~/.odin/app`).
 
 ---
 
 ## Testing
 
 ```bash
-python3 -m pytest tests/ -v          # full test suite (771 tests)
-python3 -m py_compile server/odin_agent.py
-python3 -m py_compile client/odin_guard.py
-python3 -m py_compile client/odin_cli.py
+python3 -m pytest tests/ -v          # full test suite (771 tests, ~18 detik)
+python3 -m py_compile server/odin_agent.py client/odin_guard.py client/odin_cli.py
+bash -n install.sh uninstall.sh server/run.sh server/odin-dispatch.sh
 ```
 
-**Test coverage v2.1**:
-- Core agent: 48 tests
-- Guard (READ/WRITE classifier + risk engine): 160 tests
-- Guard multi-project: 24 tests (project context, risk cards, warnings)
-- CLI: 24 tests (server/project CRUD, status, switch, run.sh)
-- Memory: 58 tests
-- **Memory improvements: 42 tests** (semantic search, staleness, similarity)
-- **Cortex: 40 tests** (global consciousness, event journal, routing)
-- **Orchestrator: 22 tests** (enrich_context, suggest_next, check_attention)
-- **Continuous learning: 24 tests** (error→lesson, cross-session, success pattern)
-- Output intelligence: 48 tests
-- Profile & mode: 44 tests
-- Fase 2-4: 95 tests
+| File | Tests | Cakupan |
+|---|---:|---|
+| `test_guard.py` | 160 | READ/WRITE classifier, 23 sub-classifier, risk engine, kartu risiko |
+| `test_core.py` | 59 | `_run` (process group, timeout, non-UTF-8, buffer terbatas), `_DANGER_RE`, cache |
+| `test_memory.py` | 58 | Append/fold/tombstone/TTL, compaction, secret guard |
+| `test_profile_mode.py` | 57 | Inspeksi, type detection, derivasi mode, enforcement |
+| `test_output_intelligence.py` | 48 | 23 pola error, suggested_commands, recurring |
+| `test_review_fixes.py` | 45 | **Regresi tiap temuan review v2.2** (K1–K5, T1–T7) |
+| `test_cli.py` | 43 | Server/project CRUD, sync, global MCP, run.sh |
+| `test_memory_improvements.py` | 42 | Semantic search TF-IDF, staleness, similarity |
+| `test_cortex.py` | 40 | Global consciousness, event journal, routing |
+| `test_fase4_proactive.py` | 38 | Watchdog, drift detection, deploy fingerprint |
+| `test_fase3.py` | 36 | Runbook engine, rollback tracking |
+| `test_fase3_ux.py` | 32 | Kartu risiko, undo hints, template |
+| `test_fase2_intelligence.py` | 25 | Session history, pre-flight, audit |
+| `test_learning.py` | 25 | Error→lesson, cross-session decay, success pattern |
+| `test_guard_multiproject.py` | 24 | Project context, identitas di kartu, warning |
+| `test_orchestrator.py` | 22 | enrich_context, suggest_next, check_attention |
+| `test_installer.py` | 17 | **`install.sh` dijalankan sungguhan** (repo lokal + HOME sementara), migrasi tata letak lama, setup/self-update/uninstall/doctor |
+
+`test_installer.py` bukan sekadar `bash -n`: installer benar-benar dieksekusi terhadap
+clone `file://` repo ini dengan `HOME` sementara, lalu tata letak, wrapper, idempotensi,
+dan **keutuhan private key saat migrasi** diverifikasi.
 
 ---
 
@@ -685,7 +774,7 @@ Auto-detect juga mendukung: PostgreSQL, MongoDB, Docker, Apache, Redis, Supervis
 |--------|-------|
 | Total kode | **~7382 baris** (server 3799 + cli 2381 + guard 895 + launcher 151 + updater 156) |
 | Total test | **771 automated tests, 17 files** |
-| CLI commands | 20 (termasuk `setup`, `self-update`, `uninstall`, `doctor` laptop, `server harden`) |
+| CLI commands | 19 (server ×5, project ×6, global ×2, setup, update, self-update, doctor, uninstall, version) |
 | Dependensi server | 1 (`mcp[cli]`) |
 | Dependensi laptop CLI | 2 (`paramiko`, `pyyaml`) |
 | MCP tools | **20** (termasuk cortex_log, cortex_events, memory_health) |
