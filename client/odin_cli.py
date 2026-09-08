@@ -971,7 +971,13 @@ def cmd_server_add() -> str | None:
         progress(3, 8, "Sudoers odin sudah ada")
 
     # [4] Install venv + mcp[cli]
-    _, _, rc = ssh.run("/home/odin/.venv/bin/python -c 'import mcp' 2>/dev/null")
+    # Cek FastMCP secara spesifik, bukan cuma `import mcp` — paket mcp v2.0
+    # merename FastMCP -> MCPServer, jadi `import mcp` tetap sukses walau
+    # venv rusak (fastmcp tak ada). Tanpa cek ini, retry setup tak pernah
+    # menimpa venv v2 yang salah dengan versi v1 yang di-pin di bawah.
+    _, _, rc = ssh.run(
+        "/home/odin/.venv/bin/python -c 'from mcp.server.fastmcp import FastMCP' 2>/dev/null"
+    )
     if rc != 0:
         info("  Menginstall venv + mcp[cli] (bisa 1-2 menit)...")
         # Ubuntu/Debian: `python3 -m venv` butuh paket python3-venv (ensurepip).
@@ -980,7 +986,9 @@ def cmd_server_add() -> str | None:
         ssh.run(f"{pp}DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv python3-pip", timeout=180)
         ssh.run(f"{pp}su - odin -c 'rm -rf /home/odin/.venv && python3 -m venv /home/odin/.venv'")
         out, errs, rc = ssh.run(
-            f"{pp}su - odin -c '/home/odin/.venv/bin/pip install --quiet \"mcp[cli]\"'",
+            # Pin <2.0: mcp 2.0 me-rename FastMCP -> MCPServer (breaking change),
+            # sedangkan odin_agent.py masih pakai `from mcp.server.fastmcp import FastMCP`.
+            f"{pp}su - odin -c '/home/odin/.venv/bin/pip install --quiet \"mcp[cli]<2.0\"'",
             timeout=180
         )
         if rc != 0:
@@ -1779,7 +1787,7 @@ def cmd_doctor(alias: str) -> None:
     checks = [
         ("odin_agent.py ada", "test -f /home/odin/odin_agent.py && echo OK"),
         ("run.sh executable", "test -x /home/odin/run.sh && echo OK"),
-        ("mcp module", "/home/odin/.venv/bin/python -c 'import mcp' 2>/dev/null && echo OK"),
+        ("mcp module", "/home/odin/.venv/bin/python -c 'from mcp.server.fastmcp import FastMCP; print(\"OK\")' 2>/dev/null"),
         ("projects/ dir", "test -d /home/odin/projects && echo OK"),
         ("memory/ dir", "test -d /home/odin/memory && echo OK"),
     ]
