@@ -6,6 +6,168 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-09-08
+
+Rilis perbaikan berdasarkan review keamanan & robustness eksternal atas v2.2.0.
+Semua temuan **Kritis (K1–K5)** dan **Tinggi (T1–T7)** ditutup, plus sebagian besar
+temuan Sedang dan drift dokumentasi. 740 test (dari 699), semuanya lulus.
+
+### Security — Kritis
+
+- **K1 — Sudoers `tail -n * /var/log/*` dihapus.** sudo mencocokkan argumen dengan
+  `fnmatch(3)` TANPA `FNM_PATHNAME`, jadi `*` ikut cocok dengan `/` dan `..`:
+  `sudo tail -n 1 /var/log/../../etc/shadow` membaca shadow sebagai root, dan itu
+  dapat dijangkau lewat `run_command` biasa. `tail_log` tetap jalan sebagai user `odin`.
+- **K1b — `journalctl *` → `journalctl --no-pager *`.** Tanpa `--no-pager`, pager
+  berjalan sebagai root dan `!/bin/sh` di dalamnya memberi shell root.
+- **K2 — `certbot renew *` diganti aturan tanpa argumen bebas.** `certbot renew
+  --deploy-hook='...'` mengeksekusi perintah arbitrer sebagai root.
+- **K2b — `/usr/local/bin/*-deploy` dihapus** (wildcard nama = skrip apa pun).
+- **Sudoers kini divalidasi `visudo -cf` sebelum dipasang, dengan rollback.**
+  Sudoers rusak = seluruh `sudo` di server rusak.
+- **K3 — Kunci SSH ODIN memakai forced-command.** `authorized_keys` ditulis sebagai
+  `restrict,command="/home/odin/odin-dispatch.sh"`. Skrip baru `server/odin-dispatch.sh`
+  hanya menerima `run.sh [--project <nama>]` (nama dibatasi `[A-Za-z0-9._-]`, metakarakter
+  ditolak). Pemegang private key tak lagi mendapat shell interaktif ber-TTY — jalur
+  eskalasi root lewat pager tertutup. Pemasangan kunci kini idempoten (tak lagi
+  menumpuk duplikat tiap `server add`).
+- **K4 — Guard: perintah pembungkus di-unwrap.** `env rm -rf /var/www/app` dulu
+  diklasifikasi READ dan **dieksekusi tanpa konfirmasi**. `_unwrap()` kini melewati
+  `env`/`nice`/`ionice`/`nohup`/`timeout`/`stdbuf`/`setsid`/`command`/`xargs`/`time`
+  beserta flag & `VAR=val`-nya, lalu menilai perintah SEBENARNYA. Ikut diperbaiki:
+  `sed --in-place` disamakan dengan `-i`, dan substitusi proses `<(`/`>(` memicu "ask".
+  Ini juga menutup runbook yang auto-approve karena "semua langkah read-only".
+- **K5 — `project add`/`sync` tak lagi menimpa hook user.** Dulu
+  `settings["hooks"]["PreToolUse"] = [...]` (assignment) membuang hook `Bash` milik
+  user tanpa peringatan. Sekarang memakai `_ensure_guard_hook()` yang merge per-matcher.
+
+### Security — Tinggi
+
+- **T7 — `_DANGER_RE` diperkuat & disinkronkan.** `_normalize_flags()` (ada di server
+  DAN guard, harus tetap identik) menormalkan `rm -fr`, `rm -f -r`, dan
+  `rm --recursive --force` menjadi `rm -rf` sebelum pencocokan. Pola baru: `poweroff`,
+  `DROP SCHEMA`, `find / … -delete`, `rm -rf .`.
+- **Matcher hook dilebarkan ke `mcp__odin__.*`.** Dengan matcher sempit, tool baru
+  (mis. `cortex_log`, `memory_health`) diam-diam lolos tanpa penilaian guard. Guard
+  sendiri yang memutuskan: `READ_ONLY_TOOLS` → allow, sisanya → kartu risiko.
+- **Audit dicerminkan ke journald** (`AUDIT_SYSLOG=0` untuk mematikan). `audit.jsonl`
+  milik user `odin` dan bisa di-truncate lewat `run_command` yang sama.
+
+### Fixed — Robustness
+
+- **T1 — Singleton tak lagi membunuh proses sembarangan.** PID diverifikasi sebagai
+  proses `odin_agent.py` (`/proc/<pid>/cmdline`, fallback `ps`) sebelum sinyal dikirim,
+  dan SIGKILL hanya setelah menunggu SIGTERM sampai ~15 detik (dulu 1,5 detik buta —
+  sesi lain bisa mati di tengah `laravel_deploy`).
+- **T2 — Mode `production` hanya dari sinyal eksplisit** (`APP_ENV=production` di `.env`
+  aplikasi, atau `ODIN_ENV=production`). Uptime & disk bukan sinyal lingkungan; aturan
+  lama membuat VPS staging berumur 8 hari kehilangan `laravel_deploy` dan
+  `apt/npm/pip install`. `_PRODUCTION_BLOCKED_CMDS` juga kini menangkap `apt -y install`
+  (flag sebelum sub-perintah).
+- **T3 — Inspeksi startup tak lagi memblokir handshake MCP.** `_full_inspect()` (4
+  perintah serial, timeout 30+15+30+15 detik) dulu jalan saat import, sebelum
+  `FastMCP()` — jauh di atas batas koneksi MCP 30 detik. Kini dijadwalkan di thread
+  latar; sesi langsung hidup dengan profil cache/`deploy`.
+- **T4 — Timeout tak lagi meninggalkan orphan; output non-UTF-8 tak lagi jadi "ERROR".**
+  `_run` memakai `Popen(start_new_session=True)` dan `killpg` seluruh process group saat
+  timeout (dulu hanya wrapper `bash` yang mati — `composer install`/`npm ci` terus jalan).
+  Dekode memakai `errors="replace"`, dan output dialirkan ke buffer head/tail terbatas
+  alih-alih ditampung utuh di RAM.
+- **T5 — `curl | bash` bisa lanjut ke `odin server add`.** Wizard dijalankan dengan
+  `</dev/tty`; prompt `read` di `uninstall.sh` juga dialihkan ke `/dev/tty`.
+- **T6 — Installer tak lagi memindahkan `~/.odin`.** Folder itu juga rumah state CLI
+  (`keys/`, `servers/`, `projects/`, `modes/`); `mv` membuat private key hilang dari
+  jalur yang masih ditunjuk `~/.ssh/config`. Kini clone dilakukan di tempat, state
+  dipertahankan. `.gitignore` juga menolak `keys/ servers/ projects/ modes/ ssh_config`
+  supaya `git add -A` di `~/.odin` tak bisa meng-commit private key.
+- **PEP 668**: dependensi CLI jatuh ke venv `$INSTALL_DIR/.venv` bila Python sistem
+  `externally-managed`, dan `odin` dipasang sebagai wrapper (bukan symlink) yang
+  memakai interpreter itu.
+
+### Fixed — Perilaku
+
+- **Cache READ diinvalidasi oleh perintah WRITE.** `cat f` → `sed -i` → `cat f` dulu
+  mengembalikan isi lama selama 60 detik.
+- **`tail_log` tak lagi sukses palsu.** `set -o pipefail` + rc `grep`-tanpa-hasil
+  dinormalkan ke 0; analisis pola error kini berjalan pada ISI log (`force=True`),
+  bukan hanya saat exit ≠ 0 — `tail` yang berhasil selalu exit 0.
+- **Compaction memory berbasis rasio/ukuran** (`MEMORY_DEAD_RATIO`, `MEMORY_MAX_BYTES`),
+  di bawah `LOCK_EX`, memakai `mkstemp` di direktori yang sama. Pemicu lama (entri HIDUP
+  > 2000) tak pernah tercapai lewat upsert sehingga histori mati menumpuk selamanya.
+- **Baris JSONL terpotong diperbaiki saat append** (crash di tengah tulis dulu menelan
+  record berikutnya).
+- **Fold cache invalid lintas-proses** lewat `(mtime, size)` — sesi A kini melihat
+  instruksi baru dari sesi B.
+- **Auto-learning: decay + buang noise.** Hitungan error diparuh tiap sesi;
+  `generic_failure`/`file_not_found` dikeluarkan dari pembelajaran (dulu setiap `grep`
+  tanpa hasil ikut terhitung, dan `recurring` jadi status permanen). Lesson
+  (`tag: error-lesson`) kini ikut di-recall `_enrich_context` — loop belajar tertutup.
+- **`memory_health` tak lagi kuadratik** — indeks terbalik token menggantikan
+  perbandingan semua-lawan-semua.
+- **Rotasi `audit.jsonl` & `events.jsonl`** pada `LOG_ROTATE_BYTES` (default 5 MB).
+- **`http_health_check` mengembalikan body** (dipotong 2000 byte), sesuai janji README.
+- **Envelope error seragam** — penolakan membawa `error` DAN `stderr` dengan pesan sama.
+- **Guard mengenali project pada konfigurasi MCP global.** `_detect_from_registry()`
+  meresolusi project dari `cwd` lewat `~/.odin/projects/*` (aturan sama dengan
+  `odin_mcp_launch.py`); tanpa ini identitas project hilang dari kartu risiko dan
+  mode per-project tak terbaca sejak MCP dipindah ke scope-user.
+- **`~/.odin/ssh_config` + `Include`** menggantikan penulisan langsung ke `~/.ssh/config`:
+  cek tabrakan alias jadi EKSAK (dulu substring — `vps` dianggap ada karena ada
+  `vps-app`), entry membawa `IdentitiesOnly yes` & `BatchMode yes`, dan `Include`
+  ditaruh paling atas supaya tak kalah oleh blok `Host *` milik user.
+- **`odin server add` memeriksa return code setiap langkah remote.** Dulu semua rc
+  diabaikan: dengan admin tanpa NOPASSWD sudo semua langkah "berhasil" padahal gagal,
+  lalu YAML & `~/.ssh/config` tetap ditulis. Kini gagal → config lokal tidak ditulis
+  dan penyebabnya dilaporkan.
+- **`odin update` aman**: backup ke `~/.backup/<ts>`, upload ke `.new`, compile-check
+  (`py_compile` + `bash -n`), ganti atomik, lalu handshake MCP; gagal → dibatalkan.
+- **`odin doctor` / `server test` melakukan handshake MCP sungguhan** (`initialize` +
+  `tools/list` lewat `run.sh`), bukan sekadar `test -f`.
+- **`run.sh`**: argumen tak dikenal & nama project tak valid ditolak; ≥2 project tanpa
+  `--project` kini FATAL (dulu jatuh senyap ke `PROJECT_ROOT=/var/www/html`).
+
+### Added
+
+- **`odin server harden <alias>` — perbaikan K1–K3 untuk server yang SUDAH terpasang.**
+  Tanpa ini rilis 2.3.0 hanya mengamankan server baru: `server add` melewati sudoers
+  bila `/etc/sudoers.d/odin` sudah ada, dan `odin update` berjalan sebagai user `odin`
+  yang tak berhak menulis `/etc/sudoers.d`. Perintah ini meminta kredensial admin,
+  mem-backup sudoers lama, memasang aturan baru (tervalidasi `visudo -cf`), memasang
+  dispatcher, lalu membatasi kunci ke forced-command — **diverifikasi lewat koneksi SSH
+  BARU** (forced-command hanya berlaku saat autentikasi, jadi sesi berjalan tak
+  membuktikan apa pun), dan `authorized_keys` dikembalikan bila verifikasi gagal
+  sehingga tak ada risiko terkunci dari server.
+- **`odin update` memigrasikan kunci ke forced-command** (user `odin` memiliki
+  `authorized_keys`-nya sendiri) dengan verifikasi + rollback yang sama, dan
+  **melaporkan** bila sudoers server masih rentan.
+- **`odin doctor` mengaudit postur keamanan server**: pola sudoers rentan
+  (`tail` berwildcard, `certbot renew *`, `*-deploy`, `journalctl` tanpa `--no-pager`)
+  dan kunci tanpa forced-command.
+- `server/odin-dispatch.sh` — dispatcher forced-command SSH.
+- `odin server remove --purge` — cabut kunci ODIN dari `authorized_keys` server.
+- `tests/test_review_fixes.py` (31 test) — regresi untuk setiap temuan di atas.
+- Env baru: `ODIN_ENV`, `MEMORY_MAX_BYTES`, `MEMORY_DEAD_RATIO`, `LOG_ROTATE_BYTES`,
+  `AUDIT_SYSLOG`.
+
+### Removed
+
+- **`migrate-to-v2.1.sh`** — menulis manifest dengan kunci yang tak dikenali CLI
+  (`workdir`/`remote_path` vs `local_workdir`/`remote_root`), menimpa `settings.json`
+  dengan format hook yang tak diterima Claude Code, dan hardcoded `simuru`/`vps-app`.
+  Gunakan `odin project add --yes` / `odin project sync --all`.
+- **`setup_full()` di `install.sh`** (~580 baris) — dead code, tak pernah dipanggil
+  `main()`, dan men-generate `run.sh` lama yang mengabaikan `--project`.
+
+### Changed
+
+- Versi disinkronkan ke **2.3.0** di `odin_agent.py`, `odin_guard.py`, dan `odin_cli.py`
+  (guard sebelumnya tertinggal di 2.1.0).
+- Slash command `/odin:*` disalin ke `~/.claude/commands/odin/` oleh installer — dulu
+  hanya bekerja bila Claude Code dijalankan dari dalam repo ODIN.
+- `/odin:setup` tak lagi menyuruh mengedit `~/.claude.json` manual; ia memandu ke CLI.
+- README & CLAUDE.md disinkronkan dengan keadaan sebenarnya (jumlah test, tools, baris,
+  default `MEMORY_DIR`, sifat `LOCK_CWD_TO_PROJECT`, file yang di-gitignore).
+
 ## [2.2.0] - 2026-06-28
 
 ### Added — MCP Global (tersedia otomatis di tiap project)

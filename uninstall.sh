@@ -5,6 +5,16 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 set -euo pipefail
 
+# ── TTY untuk input interaktif (penting saat `curl | bash`) ────────────────
+# Tanpa ini `read -r` membaca sisa skrip dari pipe (atau EOF) dan, di bawah
+# `set -e`, uninstall langsung berhenti.
+if [ -t 0 ]; then
+    TTY_FD=0
+else
+    exec 3</dev/tty 2>/dev/null || { echo "ERROR: Tidak bisa membuka /dev/tty." >&2; exit 1; }
+    TTY_FD=3
+fi
+
 INSTALL_DIR="${ODIN_INSTALL_DIR:-$HOME/.odin}"
 BIN_LINK="/usr/local/bin/odin-update"
 CLAUDE_JSON="$HOME/.claude.json"
@@ -41,7 +51,7 @@ printf "  • Entry ${CYAN}mcpServers.odin${NC} dari ~/.claude.json\n"
 printf "  • Hook ${CYAN}mcp__odin__${NC} dari settings.json\n"
 printf "\n"
 printf "${BOLD}Lanjutkan? [y/N]${NC} "
-read -r confirm
+read -r confirm <&"$TTY_FD"
 if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
     info "Dibatalkan."
     exit 0
@@ -163,11 +173,11 @@ fi
 
 # ── Tawarkan cleanup server ────────────────────────────────────────────────
 printf "\n${BOLD}Hapus ODIN dari server juga? [y/N]${NC} "
-read -r do_server
+read -r do_server <&"$TTY_FD"
 if [[ "$do_server" =~ ^[Yy]$ ]]; then
     printf "\n"
     printf "  ${BOLD}SSH user@host${NC} server (contoh: root@192.168.1.100): "
-    read -r server_host
+    read -r server_host <&"$TTY_FD"
     if [ -n "$server_host" ]; then
         info "Menghubungi $server_host..."
         if ssh -o ConnectTimeout=10 "$server_host" \

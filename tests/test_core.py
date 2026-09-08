@@ -1,5 +1,6 @@
 """Test Core — _truncate, _path_inside, _build_invocation, _run, _DANGER_RE."""
-import sys, types, os, unittest
+import subprocess
+import sys, types, os, time, unittest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -231,29 +232,27 @@ class TestDangerRE(unittest.TestCase):
 # _run — unit test (mocked subprocess)
 # ===========================================================================
 class TestRun(unittest.TestCase):
+    """_run dieksekusi SUNGGUHAN (bash lokal) — sejak v2.3 ia memakai Popen +
+    process group, jadi mock subprocess.run tak lagi merepresentasikan apa pun."""
 
-    @patch("subprocess.run")
-    def test_success(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0, stdout="output\n", stderr=""
-        )
+    def test_success(self):
         r = da._run("echo hello", None, 10)
         self.assertTrue(r["success"])
         self.assertEqual(r["exit_code"], 0)
-        self.assertIn("output", r["stdout"])
+        self.assertIn("hello", r["stdout"])
 
-    @patch("subprocess.run")
-    def test_failure(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=1, stdout="", stderr="error msg"
-        )
-        r = da._run("false", None, 10)
+    def test_failure(self):
+        r = da._run("exit 3", None, 10)
         self.assertFalse(r["success"])
-        self.assertEqual(r["exit_code"], 1)
+        self.assertEqual(r["exit_code"], 3)
 
-    @patch("subprocess.run", side_effect=Exception("boom"))
-    def test_exception(self, mock_run):
-        r = da._run("bad_cmd", None, 10)
+    def test_stderr_captured(self):
+        r = da._run("echo oops >&2; exit 1", None, 10)
+        self.assertIn("oops", r["stderr"])
+
+    def test_exception(self):
+        with patch("subprocess.Popen", side_effect=Exception("boom")):
+            r = da._run("bad_cmd", None, 10)
         self.assertFalse(r["success"])
         self.assertIn("boom", r["stderr"])
 
@@ -263,26 +262,51 @@ class TestRun(unittest.TestCase):
         self.assertTrue(r.get("blocked"))
         self.assertIn("DITOLAK", r["stderr"])
 
+    def test_danger_flag_variants_blocked(self):
+        """Regresi T7: varian flag tak boleh lolos hard-block."""
+        for cmd in ("rm -fr /", "rm --recursive --force /", "find / -delete",
+                    "systemctl poweroff", "mysql -e 'DROP SCHEMA prod'"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(da._run(cmd, None, 5).get("blocked"), cmd)
+
     def test_danger_allowed(self):
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            r = da._run("rm -rf /", None, 10, allow_dangerous=True)
-            self.assertTrue(r["success"])
+        r = da._run("true # rm -rf /", None, 10, allow_dangerous=True)
+        self.assertTrue(r["success"])
 
     def test_timeout_clamped(self):
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            da._run("ls", None, 99999)
-            call_kwargs = mock_run.call_args
-            self.assertLessEqual(call_kwargs.kwargs.get("timeout", 0), da.MAX_TIMEOUT)
+        r = da._run("echo hi", None, 99999)
+        self.assertTrue(r["success"])          # tak error meski timeout > MAX_TIMEOUT
 
-    @patch("subprocess.run")
-    def test_timeout_expired(self, mock_run):
-        import subprocess
-        mock_run.side_effect = subprocess.TimeoutExpired("cmd", 10, output="partial", stderr="")
-        r = da._run("long_cmd", None, 10)
+    def test_timeout_expired(self):
+        r = da._run("sleep 30", None, 1)
         self.assertFalse(r["success"])
         self.assertTrue(r.get("timeout"))
+        self.assertIn("TIMEOUT", r["stderr"])
+
+    def test_timeout_kills_orphan_children(self):
+        """Regresi T4: timeout dulu hanya membunuh wrapper bash — `composer install`
+        / `npm ci` terus jalan sebagai orphan."""
+        marker = "odin-orphan-test-4711"
+        r = da._run(f"sleep 90 & echo {marker}; wait", None, 1)
+        self.assertTrue(r.get("timeout"))
+        time.sleep(0.5)
+        found = subprocess.run(["pgrep", "-f", "sleep 90"],
+                               capture_output=True, text=True).stdout.strip()
+        self.assertEqual(found, "", "child process masih hidup setelah timeout")
+
+    def test_non_utf8_output_not_reported_as_error(self):
+        """Regresi T4: byte non-UTF-8 (mysqldump, git log latin1) dulu melempar
+        UnicodeDecodeError dan dilaporkan ERROR dgn stdout kosong."""
+        r = da._run(r"printf '\xff\xfe latin1 \xc3'", None, 10)
+        self.assertTrue(r["success"])
+        self.assertIn("latin1", r["stdout"])
+
+    def test_output_is_bounded(self):
+        """Output raksasa tidak boleh ditampung utuh di RAM."""
+        r = da._run("head -c 3000000 /dev/zero | tr '\\0' 'x'", None, 30)
+        self.assertTrue(r["success"])
+        self.assertLess(len(r["stdout"]), da.OUTPUT_LIMIT + 200)
+        self.assertIn("dipotong", r["stdout"])
 
     def test_lock_cwd_enforcement(self):
         orig_lock = da.LOCK_CWD_TO_PROJECT
@@ -297,18 +321,35 @@ class TestRun(unittest.TestCase):
             da.LOCK_CWD_TO_PROJECT = orig_lock
             da.PROJECT_ROOT = orig_root
 
-    @patch("subprocess.run")
-    def test_duration_recorded(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+    def test_duration_recorded(self):
         r = da._run("echo hi", None, 10)
         self.assertIn("duration_sec", r)
         self.assertIsInstance(r["duration_sec"], float)
 
-    @patch("subprocess.run")
-    def test_command_in_result(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+    def test_command_in_result(self):
         r = da._run("whoami", None, 10)
         self.assertEqual(r["command"], "whoami")
+
+
+class TestCacheInvalidation(unittest.TestCase):
+    """Regresi: hasil READ yang di-cache harus dibuang saat ada perintah WRITE."""
+
+    def setUp(self):
+        da._result_cache.clear()
+
+    def tearDown(self):
+        da._result_cache.clear()
+
+    def test_write_command_clears_cache(self):
+        da._cache_set("cat /tmp/x", "", {"success": True, "stdout": "lama"})
+        self.assertIsNotNone(da._cache_get("cat /tmp/x", ""))
+        da._cache_invalidate("sed -i s/a/b/ /tmp/x")
+        self.assertIsNone(da._cache_get("cat /tmp/x", ""))
+
+    def test_read_command_keeps_cache(self):
+        da._cache_set("cat /tmp/x", "", {"success": True, "stdout": "lama"})
+        da._cache_invalidate("cat /tmp/x")
+        self.assertIsNotNone(da._cache_get("cat /tmp/x", ""))
 
 
 # ===========================================================================

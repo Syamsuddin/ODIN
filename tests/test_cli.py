@@ -597,9 +597,16 @@ class TestProjectSync:
 # ── odin global (MCP scope-user) ─────────────────────────────────────────────
 
 class TestGlobalMcp:
+    """Config global: definisi MCP → ~/.claude.json, hook/allow → ~/.claude/settings.json.
+
+    `claude` CLI di-patch jadi tidak ada supaya test HERMETIS — tanpa ini test
+    memanggil binari `claude` sungguhan dan mengubah ~/.claude.json milik user."""
+
     def _enable(self, tmp_path, migrate=False):
         user_claude = tmp_path / "userclaude"
-        with patch.object(odin_cli, "USER_CLAUDE_DIR", user_claude):
+        with patch.object(odin_cli, "USER_CLAUDE_DIR", user_claude), \
+             patch.object(odin_cli, "USER_CLAUDE_JSON", tmp_path / "claude.json"), \
+             patch.object(odin_cli.shutil, "which", return_value=None):
             odin_cli.cmd_global_enable(migrate=migrate)
         return user_claude / "settings.json"
 
@@ -607,10 +614,13 @@ class TestGlobalMcp:
         _setup_dirs(tmp_path)
         with _patch_dirs(tmp_path):
             sp = self._enable(tmp_path)
-        s = json.loads(sp.read_text())
-        odin = s["mcpServers"]["odin"]
+        # definisi server MCP ada di ~/.claude.json (satu-satunya yg dibaca Claude Code)
+        cj = json.loads((tmp_path / "claude.json").read_text())
+        odin = cj["mcpServers"]["odin"]
         assert odin["command"] == "python3"
         assert odin["args"][0].endswith("odin_mcp_launch.py")
+        # hook guard + allow-list read-only ada di ~/.claude/settings.json
+        s = json.loads(sp.read_text())
         assert any(h["matcher"].startswith("mcp__odin__")
                    for h in s["hooks"]["PreToolUse"])
         assert "mcp__odin__server_info" in s["permissions"]["allow"]
@@ -625,7 +635,9 @@ class TestGlobalMcp:
                 {"matcher": "Bash", "hooks": [{"type": "command", "command": "x"}]}]},
             "permissions": {"allow": ["Bash(ls)"]},
         }))
-        with _patch_dirs(tmp_path), patch.object(odin_cli, "USER_CLAUDE_DIR", user_claude):
+        with _patch_dirs(tmp_path), patch.object(odin_cli, "USER_CLAUDE_DIR", user_claude), \
+             patch.object(odin_cli, "USER_CLAUDE_JSON", tmp_path / "claude.json"), \
+             patch.object(odin_cli.shutil, "which", return_value=None):
             odin_cli.cmd_global_enable()
         s = json.loads((user_claude / "settings.json").read_text())
         assert s["model"] == "opus"
@@ -637,7 +649,9 @@ class TestGlobalMcp:
     def test_enable_idempotent(self, tmp_path):
         _setup_dirs(tmp_path)
         user_claude = tmp_path / "userclaude"
-        with _patch_dirs(tmp_path), patch.object(odin_cli, "USER_CLAUDE_DIR", user_claude):
+        with _patch_dirs(tmp_path), patch.object(odin_cli, "USER_CLAUDE_DIR", user_claude), \
+             patch.object(odin_cli, "USER_CLAUDE_JSON", tmp_path / "claude.json"), \
+             patch.object(odin_cli.shutil, "which", return_value=None):
             odin_cli.cmd_global_enable()
             odin_cli.cmd_global_enable()
         s = json.loads((user_claude / "settings.json").read_text())
@@ -648,11 +662,15 @@ class TestGlobalMcp:
     def test_disable_removes_entry(self, tmp_path):
         _setup_dirs(tmp_path)
         user_claude = tmp_path / "userclaude"
-        with _patch_dirs(tmp_path), patch.object(odin_cli, "USER_CLAUDE_DIR", user_claude):
+        with _patch_dirs(tmp_path), patch.object(odin_cli, "USER_CLAUDE_DIR", user_claude), \
+             patch.object(odin_cli, "USER_CLAUDE_JSON", tmp_path / "claude.json"), \
+             patch.object(odin_cli.shutil, "which", return_value=None):
             odin_cli.cmd_global_enable()
             odin_cli.cmd_global_disable()
         s = json.loads((user_claude / "settings.json").read_text())
         assert "odin" not in (s.get("mcpServers") or {})
+        cj = json.loads((tmp_path / "claude.json").read_text())
+        assert "odin" not in (cj.get("mcpServers") or {})
 
     def test_migrate_purges_per_workdir(self, tmp_path):
         _setup_dirs(tmp_path)

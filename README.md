@@ -12,7 +12,7 @@
   <a href="#"><img src="https://img.shields.io/badge/CLI_Commands-12-4caf50?style=flat-square&logo=terminal&logoColor=white" alt="12 CLI Commands"/></a>
   <a href="#"><img src="https://img.shields.io/badge/Security-4_Layers-e53935?style=flat-square&logo=shield&logoColor=white" alt="4 Security Layers"/></a>
   <a href="#"><img src="https://img.shields.io/badge/Risk_Tiers-5-ff9800?style=flat-square&logo=alert&logoColor=white" alt="5 Risk Tiers"/></a>
-  <a href="#"><img src="https://img.shields.io/badge/Tests-664-9c27b0?style=flat-square&logo=pytest&logoColor=white" alt="664 Tests"/></a>
+  <a href="#"><img src="https://img.shields.io/badge/Tests-740-9c27b0?style=flat-square&logo=pytest&logoColor=white" alt="740 Tests"/></a>
 </p>
 
 <p align="center">
@@ -54,14 +54,14 @@ LAPTOP (Claude Code CLI)                    SERVER(S) (VPS, user: odin)
 │  ├─ project add/list/rm │  per project    │  projects/<name>.conf          │
 │  ├─ project status/sync │                 │  memory/<name>/ (isolated)     │
 │  ├─ project switch      │                 │                                │
-│  └─ update / doctor     │                 │  17 MCP tools                  │
+│  └─ update / doctor     │                 │  20 MCP tools                  │
 │                         │                 │  Output intelligence (23)      │
 │  odin_guard.py          │                 │  Rollback tracking             │
 │  ├─ READ/WRITE classify │                 │  Runbook engine + templates    │
 │  ├─ Risk engine (5 tier)│                 │  Server profiler + modes       │
 │  ├─ Per-project mode    │                 │  Audit log + watchdog          │
 │  ├─ Project identity UI │                 │                                │
-│  └─ Kartu risiko + warn │                 │  2335 baris Python             │
+│  └─ Kartu risiko + warn │                 │  3794 baris Python             │
 │                         │                 └────────────────────────────────┘
 │  ~/.odin/               │
 │  ├─ servers/ keys/      │
@@ -70,7 +70,7 @@ LAPTOP (Claude Code CLI)                    SERVER(S) (VPS, user: odin)
 │  <workdir>/.claude/     │  ← MCP config per project (workdir-based switching)
 │    settings.json        │
 │                         │
-│  ~2400 baris Python     │
+│  ~2940 baris Python     │
 └─────────────────────────┘
 ```
 
@@ -83,37 +83,39 @@ LAPTOP (Claude Code CLI)                    SERVER(S) (VPS, user: odin)
 ```
 ODIN/
 ├── server/
-│   ├── odin_agent.py        # MCP server (2905 baris) — jalan di VPS
+│   ├── odin_agent.py        # MCP server (3794 baris) — jalan di VPS
 │   │                        # + Orchestrator + Continuous Learning + Cortex
-│   └── run.sh               # Multi-project launcher: --project <name>
+│   ├── run.sh               # Multi-project launcher: --project <name>
+│   └── odin-dispatch.sh     # Forced-command SSH: kunci ODIN tak memberi shell
 ├── client/
-│   ├── odin_cli.py          # CLI multi-server & multi-project (1149 baris)
-│   ├── odin_guard.py        # Risk engine + guard (720 baris) — project-aware
+│   ├── odin_cli.py          # CLI multi-server & multi-project (1739 baris)
+│   ├── odin_guard.py        # Risk engine + guard (895 baris) — project-aware
+│   ├── odin_mcp_launch.py   # Launcher MCP global: cwd → project (151 baris)
 │   └── update_checker.py    # Cek versi terbaru (155 baris)
-├── tests/                   # 664 tests across 15 files
-│   ├── test_core.py         # (48), test_guard.py (160), test_memory.py (58)
+├── tests/                   # 740 tests across 16 files
+│   ├── test_core.py         # (59), test_guard.py (160), test_memory.py (58)
 │   ├── test_memory_improvements.py (42)  # Semantic search, staleness, similarity
 │   ├── test_cortex.py       # (40) — Global consciousness + event journal
 │   ├── test_orchestrator.py # (22) — Sistem saraf otonom
-│   ├── test_learning.py     # (24) — Continuous learning (3 loop)
+│   ├── test_learning.py     # (25) — Continuous learning (3 loop)
 │   ├── test_output_intelligence.py (48), test_fase2_intelligence.py (25)
 │   ├── test_fase3.py (36), test_fase3_ux.py (32), test_fase4_proactive.py (38)
-│   ├── test_profile_mode.py (44)
+│   ├── test_profile_mode.py (57)
 │   ├── test_guard_multiproject.py (24)  # Project awareness tests
-│   └── test_cli.py          # (24) — CLI + run.sh + project tests
-├── docs/
-│   └── MEMORY_NOTES.md
-├── install.sh               # Installer v2.1 (macOS & Linux)
-├── install.ps1              # Installer v2.1 (Windows PowerShell)
+│   ├── test_review_fixes.py (31)        # Regresi temuan review v2.2
+│   └── test_cli.py          # (43) — CLI + run.sh + project tests
+├── install.sh               # Installer (macOS & Linux)
+├── install.ps1              # Installer (Windows PowerShell)
 ├── uninstall.sh / .ps1
 ├── requirements.txt         # Server: mcp[cli]
 ├── requirements-cli.txt     # Laptop CLI: paramiko, pyyaml
-├── CLAUDE.md
-├── CHANGELOG.md
-└── CODING_PLAN_MULTI_PROJECT.md  # Desain multi-project
+└── CHANGELOG.md
 ```
 
-**Total**: ~4765 baris source + ~4800 baris test
+Catatan: `CLAUDE.md`, `docs/`, dan dokumen desain internal sengaja di-gitignore —
+clone segar tidak memilikinya, jadi jangan menganggapnya bagian dari struktur repo.
+
+**Total**: ~6734 baris source + ~5000 baris test
 
 ---
 
@@ -212,18 +214,19 @@ ODIN sekarang **tahu dan tampilkan** project aktif di mana-mana:
 |---------|--------|
 | `odin server add` | Setup server baru (interaktif: hostname, port, user, password) |
 | `odin server list` | Daftar server terdaftar |
-| `odin server remove <alias>` | Hapus server |
-| `odin server test <alias>` | Test koneksi + ODIN health |
+| `odin server remove <alias> [--purge]` | Hapus server (`--purge`: cabut juga kunci ODIN dari `authorized_keys` server) |
+| `odin server test <alias>` | Test koneksi + ODIN health + handshake MCP |
+| `odin server harden <alias>` | **Baru** — pasang ulang sudoers aman + kunci forced-command pada server yang dipasang ODIN ≤ v2.2 (butuh kredensial admin) |
 | `odin project add` | Link workdir lokal ↔ server:project (interaktif **atau** via flags) |
 | `odin project list` | Daftar project terdaftar (dengan marker `→` untuk project aktif) |
 | `odin project status [name]` | Validasi project: config lokal + SSH ping server |
 | `odin project switch <name>` | Buka tab Terminal baru di workdir project |
 | `odin project sync [name] [--all]` | **Baru** — Regenerasi config lokal dari manifest (pemulihan / migrasi) |
 | `odin project remove <name>` | Hapus project config (bersihkan `.claude/settings.json` + `.mcp.json`) |
-| `odin global enable [--migrate]` | **Baru** — Pasang MCP odin di scope-user (`~/.claude/settings.json`) → tersedia otomatis di semua project; `--migrate` cabut entry per-workdir lama |
+| `odin global enable [--migrate]` | Pasang MCP odin di scope-user (server → `~/.claude.json`, hook & allow → `~/.claude/settings.json`) → tersedia otomatis di semua project; `--migrate` cabut entry per-workdir lama |
 | `odin global disable` | **Baru** — Cabut entry MCP odin global |
-| `odin update <alias>` | Update odin_agent.py + run.sh di server |
-| `odin doctor <alias>` | Diagnostik server lengkap |
+| `odin update <alias>` | Update agent + run.sh + dispatcher (backup → compile-check → ganti atomik → handshake MCP) |
+| `odin doctor <alias>` | Diagnostik server + handshake MCP nyata per project (`initialize` + `tools/list`) |
 
 **Registrasi non-interaktif (batch/scripting):**
 
@@ -270,10 +273,40 @@ Lapis 3: Hard-block Katastrofik (server — _DANGER_RE)
          rm -rf /, mkfs, dd of=/dev, fork bomb, shutdown, DROP DATABASE
          Ditolak kecuali allow_dangerous=True (double brake)
               ↓
-Lapis 4: OS-level (server)
-         User odin dengan sudoers terbatas
+Lapis 4: Kunci SSH ber-forced-command (server — odin-dispatch.sh)
+         authorized_keys: restrict,command="/home/odin/odin-dispatch.sh"
+         Kunci ODIN HANYA bisa meluncurkan run.sh [--project <nama>] —
+         tak ada shell interaktif, tak ada TTY, tak ada pager sbg root
+              ↓
+Lapis 5: OS-level (server)
+         User odin dengan sudoers terbatas (tanpa wildcard argumen path)
          Batas keamanan sesungguhnya
 ```
+
+### Sudoers: aturan yang SENGAJA tidak ada
+
+sudo mencocokkan argumen dengan `fnmatch(3)` **tanpa** `FNM_PATHNAME` — `*` ikut
+cocok dengan `/` dan `..`. Karena itu aturan berwildcard-path bukan pembatas:
+
+| Aturan | Kenapa dihapus |
+|---|---|
+| `tail -n * /var/log/*` | `tail -n 1 /var/log/../../etc/shadow` membaca shadow sbg root |
+| `certbot renew *` | `--deploy-hook='...'` dieksekusi sbg root |
+| `/usr/local/bin/*-deploy` | wildcard nama = skrip apa pun yang bisa ditulis user lain |
+| `journalctl *` | tanpa `--no-pager`, pager root + `!/bin/sh` = shell root |
+
+`odin server add` memvalidasi sudoers dengan `visudo -cf` sebelum memasangnya, dan
+membatalkan (tanpa mengganti file) bila tidak valid — sudoers rusak = sudo server rusak.
+
+> **Server yang sudah terpasang tidak ikut terperbaiki otomatis.** `server add`
+> melewati sudoers bila `/etc/sudoers.d/odin` sudah ada, dan `odin update` berjalan
+> sebagai user `odin` (tanpa hak menulis `/etc/sudoers.d`). Untuk server dari ODIN
+> ≤ v2.2 jalankan **`odin server harden <alias>`** (butuh kredensial admin). Ia
+> mem-backup sudoers lama, memasang yang baru dengan validasi `visudo`, memasang
+> dispatcher, lalu membatasi kunci ke forced-command — dan **memverifikasi lewat
+> koneksi SSH baru**, mengembalikan `authorized_keys` bila verifikasi gagal
+> (tidak ada risiko terkunci). `odin update` & `odin doctor` melaporkan bila server
+> masih rentan.
 
 ### Contoh Kartu Risiko (v2.0)
 
@@ -562,7 +595,7 @@ Total waktu: < 2 menit. Intervensi user: 1x approve restart MySQL.
 | `MAX_TIMEOUT` | `900` | Timeout maksimum (detik) |
 | `OUTPUT_LIMIT` | `20000` | Potong output panjang (karakter) |
 | `AGENT_LOG_LEVEL` | `INFO` | Level log |
-| `MEMORY_DIR` | `/home/odin/memory` | Folder simpanan memory |
+| `MEMORY_DIR` | `$ODIN_HOME/memory/<project>` (di-set `run.sh`) | Folder simpanan memory |
 | `MEMORY_MAX_TEXT` | `4000` | Panjang maks teks satu entry |
 | `MEMORY_MAX_ENTRIES` | `2000` | Ambang compaction |
 | `AUDIT_ENABLED` | `1` | `0` = matikan audit log |
@@ -573,7 +606,7 @@ Total waktu: < 2 menit. Intervensi user: 1x approve restart MySQL.
 ## Testing
 
 ```bash
-python3 -m pytest tests/ -v          # full test suite (664 tests)
+python3 -m pytest tests/ -v          # full test suite (740 tests)
 python3 -m py_compile server/odin_agent.py
 python3 -m py_compile client/odin_guard.py
 python3 -m py_compile client/odin_cli.py
@@ -616,9 +649,9 @@ Auto-detect juga mendukung: PostgreSQL, MongoDB, Docker, Apache, Redis, Supervis
 
 | Metrik | Nilai |
 |--------|-------|
-| Total kode | **~4929 baris** (server 2905 + guard 720 + cli 1149 + updater 155) |
-| Total test | **690 automated tests, 15 files** |
-| CLI commands | 12 (termasuk `project status`, `switch` & `sync`) |
+| Total kode | **~6734 baris** (server 3794 + cli 1739 + guard 895 + launcher 151 + updater 155) |
+| Total test | **740 automated tests, 16 files** |
+| CLI commands | 15 (termasuk `server harden`, `project sync`, `global enable/disable`) |
 | Dependensi server | 1 (`mcp[cli]`) |
 | Dependensi laptop CLI | 2 (`paramiko`, `pyyaml`) |
 | MCP tools | **20** (termasuk cortex_log, cortex_events, memory_health) |
@@ -630,7 +663,7 @@ Auto-detect juga mendukung: PostgreSQL, MongoDB, Docker, Apache, Redis, Supervis
 | READ sub-classifiers | 23 (git, docker, mysql, npm, curl, ufw, nginx, ...) |
 | Risk tiers | 5 (AMAN / RENDAH / SEDANG / TINGGI / KRITIS) |
 | Operation modes | 3 (setup / deploy / production) |
-| Security layers | 4 (classifier → risk engine → hard-block → OS) |
+| Security layers | 5 (classifier → risk engine → hard-block → forced-command key → OS) |
 | Memory namespaces | **4** (cortex: profile, cross; project: server, instruction) |
 | **Learning loops** | **3** (error→lesson, cross-session tracking, success pattern) |
 | **Orchestrator functions** | **4** (enrich_context, suggest_next, check_attention, auto_learn) |
@@ -641,7 +674,9 @@ Auto-detect juga mendukung: PostgreSQL, MongoDB, Docker, Apache, Redis, Supervis
 
 ## Keamanan
 
-Batas sebenarnya = hak OS user `odin` + sudoers. Hook + `_DANGER_RE` = jaring pengaman, bukan sandbox. Keputusan akhir selalu di operator (konfirmasi WRITE).
+Batas sebenarnya = hak OS user `odin` + sudoers + forced-command pada kunci SSH.
+Hook + `_DANGER_RE` = jaring pengaman, bukan sandbox. Keputusan akhir selalu di
+operator (konfirmasi WRITE).
 
 Filosofi: READ auto-approve, WRITE wajib konfirmasi, katastrofik double-brake. Guard lebih ketat dari server (by design).
 
@@ -651,7 +686,8 @@ Filosofi: READ auto-approve, WRITE wajib konfirmasi, katastrofik double-brake. G
 
 ## Lisensi & Versi
 
-Versi aktif: **2.2.0** — tersimpan di `__version__` pada kedua file Python.
+Versi aktif: **2.3.0** — tersimpan di `__version__` pada `server/odin_agent.py`,
+`client/odin_guard.py`, dan `client/odin_cli.py` (ketiganya harus sinkron).
 Lihat [CHANGELOG.md](CHANGELOG.md) untuk riwayat perubahan lengkap.
 
-*ODIN v2.2 — multi-server, multi-project, workdir-based. Continuous learning. Orchestrator. Cortex consciousness. Project identity everywhere. Ringan, cerdas, belajar dari pengalaman.*
+*ODIN v2.3 — multi-server, multi-project, workdir-based. Continuous learning. Orchestrator. Cortex consciousness. Project identity everywhere. Ringan, cerdas, belajar dari pengalaman.*

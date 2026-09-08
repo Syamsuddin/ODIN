@@ -20,7 +20,7 @@ Pada error apa pun -> exit 0 tanpa output (jangan memblokir karena bug guard).
 import json
 import os
 
-__version__ = "2.1.0"
+__version__ = "2.3.0"
 import re
 import subprocess
 import sys
@@ -37,13 +37,41 @@ def emit(decision: str, reason: str) -> None:
 
 # Pola katastrofik / mengganggu sistem (selaras _DANGER_RE server + tambahan DB drop).
 DANGER = re.compile("|".join([
-    r"\brm\s+-rf\s+/(\s|$|\*)", r"\brm\s+-rf\s+~", r"\bmkfs\b",
+    r"\brm\s+-rf\s+/(\s|$|\*)", r"\brm\s+-rf\s+~",
+    r"\brm\s+-rf\s+\.{1,2}(/\*)?\s*($|;|&)", r"\bmkfs\b",
     r"\bdd\b.*\bof=/dev/", r">\s*/dev/sd[a-z]", r":\(\)\s*\{",
-    r"\bshutdown\b", r"\breboot\b", r"\bhalt\b", r"\binit\s+0\b",
+    r"\bshutdown\b", r"\breboot\b", r"\bhalt\b", r"\bpoweroff\b",
+    r"\binit\s+0\b",
     r"\bchmod\s+-R\s+777\s+/", r"\bchown\s+-R\b.*\s/\s*$",
-    r"\bdrop\s+database\b", r"\bmysqladmin\b.*\bdrop\b",
+    r"\bfind\s+/\s+[^|;]*-delete\b",
+    r"\bdrop\s+(database|schema)\b", r"\bmysqladmin\b.*\bdrop\b",
     r"\bkill(all)?\b", r"\bpkill\b",
 ]), re.IGNORECASE)
+
+# Long-option → short agar varian flag tak lolos dari pola berbasis "rm -rf".
+_FLAG_ALIASES = {
+    "--recursive": "-r", "--force": "-f", "--dir": "-d",
+    "--no-preserve-root": "-f",
+}
+
+
+def _normalize_flags(command: str) -> str:
+    """Samakan bentuk flag `rm` sebelum pencocokan pola berbahaya.
+
+    `rm -fr /`, `rm -f -r /`, dan `rm --recursive --force /` semuanya
+    dinormalkan jadi `rm -rf /` sehingga satu pola cukup menangkap semuanya.
+    """
+    s = command
+    for long_opt, short in _FLAG_ALIASES.items():
+        s = re.sub(rf"(?<![\w-]){re.escape(long_opt)}(?![\w-])", short, s)
+
+    def _fix(m: "re.Match") -> str:
+        flags = set(re.findall(r"[a-zA-Z]", m.group(1)))
+        head = "".join(f for f in "rf" if f in flags)
+        tail = "".join(sorted(flags - set("rf")))
+        return f"rm -{head}{tail} {m.group(2)}" if (head or tail) else f"rm {m.group(2)}"
+
+    return re.sub(r"\brm\s+((?:-[a-zA-Z]+\s+)+)(\S)", _fix, s)
 
 # Perintah inspeksi murni (read-only).
 READ_CMDS = {
@@ -135,13 +163,59 @@ def _db_seg_is_read(cmd: str, seg: str) -> bool:
     return False                           # tak ada verb baca jelas (mis. shell interaktif)
 
 
+# Perintah PEMBUNGKUS: tak menentukan baca/tulis sendiri — yang menentukan adalah
+# perintah di belakangnya. Tanpa ini `env rm -rf /var/www/app` lolos sebagai READ
+# hanya karena `env` ada di READ_CMDS.
+_WRAPPERS = {"env", "nice", "ionice", "nohup", "timeout", "stdbuf", "setsid",
+             "command", "builtin", "exec", "xargs", "time", "unbuffer"}
+# Flag pembungkus yang nilainya ada di token BERIKUTNYA (harus ikut dilewati).
+_WRAPPER_VALUE_FLAGS = {"-u", "-n", "-s", "-I", "-P", "-d", "-a", "-E", "-L",
+                        "-k", "--signal", "--kill-after", "--max-args",
+                        "--replace", "--delimiter", "--arg-file", "--unset"}
+
+
+def _unwrap(toks: list) -> list:
+    """Buang token pembungkus + flag/VAR=val miliknya; sisakan perintah sebenarnya."""
+    i = 0
+    while i < len(toks):
+        cmd = toks[i].split("/")[-1]
+        if cmd not in _WRAPPERS:
+            break
+        # `command -v php` / `command -V php` hanya MENCETAK lokasi → tetap read.
+        if cmd == "command" and i + 1 < len(toks) and toks[i + 1] in ("-v", "-V", "-p"):
+            return []
+        i += 1
+        while i < len(toks):
+            t = toks[i]
+            if t == "--":
+                i += 1
+                break
+            if t.startswith("-") and len(t) > 1:
+                i += 1
+                if t in _WRAPPER_VALUE_FLAGS:
+                    i += 1                      # nilai flag di token berikutnya
+                continue
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", t):
+                i += 1                          # env VAR=val cmd ...
+                continue
+            if cmd == "timeout" and re.match(r"^\d+(\.\d+)?[smhd]?$", t):
+                i += 1                          # durasi: timeout 30s cmd ...
+                continue
+            break
+    return toks[i:]
+
+
 def seg_is_read(seg: str) -> bool:
     toks = seg.split()
     i = 0
     while i < len(toks) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[i]):
         i += 1  # lewati env assignment di depan (VAR=val cmd ...)
+    toks = _unwrap(toks[i:])
+    i = 0
+    while i < len(toks) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[i]):
+        i += 1  # env VAR=val <cmd> — assignment setelah pembungkus
     if i >= len(toks):
-        return True
+        return True     # pembungkus tanpa perintah (mis. `env` polos) = read
     cmd = toks[i].split("/")[-1]
     args = toks[i + 1:]
     if cmd in ("sudo", "su", "doas"):
@@ -157,7 +231,8 @@ def seg_is_read(seg: str) -> bool:
     if cmd == "docker":
         return bool(args) and args[0] in DOCKER_READ
     if cmd == "sed":
-        return not any(a == "-i" or a.startswith("-i") for a in args)
+        return not any(a == "-i" or a.startswith("-i") or a.startswith("--in-place")
+                       for a in args)
     if cmd == "find":  # find membaca KECUALI ada -delete/-exec/-fprint dst.
         return not any(FIND_WRITE.match(a) for a in args)
     if cmd in ("awk", "gawk", "mawk"):  # awk bisa menulis lewat system()/redirect
@@ -204,9 +279,10 @@ def classify_command(command: str) -> str:
     """Kembalikan keputusan izin: 'allow' (read) | 'ask' (write/danger)."""
     if not command.strip():
         return "ask"
-    if DANGER.search(command):
+    if DANGER.search(_normalize_flags(command)):
         return "ask"
-    if re.search(r'\$\(|`', command):
+    # substitusi perintah/proses menyembunyikan perintah sesungguhnya → selalu tanya
+    if re.search(r"\$\(|`|<\(|>\(", command):
         return "ask"
     # Abaikan redirect stderr/stdout ke /dev/null (lazim di perintah read).
     c = re.sub(r"\d?>\s*/dev/null", " ", command)
@@ -367,8 +443,9 @@ def assess_command(command: str):
     db = _assess_db(command)
     if db:
         candidates.append(db)
+    norm = _normalize_flags(command)
     for pat, tier, aksi, efek, saran in _SHELL_RULES:
-        if re.search(pat, command, re.I):
+        if re.search(pat, norm, re.I):
             candidates.append((tier, aksi, efek, saran))
     # redirect/tee ke berkas nyata (di luar string ber-quote) = operasi tulis
     cc = _strip_quotes(re.sub(r"2>&1", " ", re.sub(r"\d?>\s*/dev/null", " ", command)))
@@ -383,23 +460,87 @@ def assess_command(command: str):
             "Tinjau perintah sebelum menyetujui")
 
 
+def _load_manifest(path: str) -> dict:
+    """Baca manifest ODIN (YAML flat atau JSON) tanpa dependensi eksternal.
+
+    Guard berjalan dengan python3 sistem (tanpa venv), jadi tak boleh butuh pyyaml."""
+    try:
+        with open(path) as f:
+            text = f.read()
+    except OSError:
+        return {}
+    try:
+        return json.loads(text) or {}
+    except json.JSONDecodeError:
+        pass
+    data: dict = {}
+    for line in text.splitlines():
+        line = line.rstrip()
+        if not line or line.lstrip().startswith("#") or ":" not in line:
+            continue
+        k, _, v = line.partition(":")
+        data[k.strip()] = v.strip().strip("'\"")
+    return data
+
+
+def _detect_from_registry(cwd: str) -> tuple:
+    """Resolusi project dari cwd lewat ~/.odin/projects/*.{yaml,json}.
+
+    Sejak MCP dipasang GLOBAL (satu entry scope-user + odin_mcp_launch.py),
+    .claude/settings.json project tak lagi memuat entry odin — tanpa jalur ini,
+    identitas project hilang dari kartu risiko dan mode per-project tak terbaca.
+    Aturan sama persis dengan launcher: local_workdir == cwd atau prefix-nya,
+    yang TERPANJANG menang."""
+    projects_dir = os.path.expanduser("~/.odin/projects")
+    if not os.path.isdir(projects_dir):
+        return "", ""
+    try:
+        cwd_norm = os.path.normpath(os.path.realpath(cwd))
+    except OSError:
+        return "", ""
+    best = ("", "")
+    best_len = -1
+    for fname in sorted(os.listdir(projects_dir)):
+        if not fname.endswith((".yaml", ".yml", ".json")):
+            continue
+        d = _load_manifest(os.path.join(projects_dir, fname))
+        wd = d.get("local_workdir")
+        if not wd:
+            continue
+        try:
+            wd_norm = os.path.normpath(os.path.realpath(os.path.expanduser(str(wd))))
+        except OSError:
+            continue
+        if (cwd_norm == wd_norm or cwd_norm.startswith(wd_norm + os.sep)) \
+                and len(wd_norm) > best_len:
+            best = (str(d.get("name") or "").strip(), str(d.get("server") or "").strip())
+            best_len = len(wd_norm)
+    return best
+
+
 def _detect_project_context() -> tuple:
-    """Deteksi (project_name, server_alias) dari .claude/settings.json."""
+    """Deteksi (project_name, server_alias).
+
+    Urutan: .claude/settings.json workdir (config per-project, v2.0/2.1) →
+    registry ~/.odin/projects (config global, v2.2+)."""
     cwd = os.environ.get("CLAUDE_WORKING_DIRECTORY", os.getcwd())
     settings_path = os.path.join(cwd, ".claude", "settings.json")
     try:
         with open(settings_path) as f:
             data = json.load(f)
         args = data.get("mcpServers", {}).get("odin", {}).get("args", [])
-        server_alias = args[0] if args else ""
-        project = ""
-        for i, arg in enumerate(args):
-            if arg == "--project" and i + 1 < len(args):
-                project = args[i + 1]
-                break
-        return project, server_alias
+        if args:
+            server_alias = args[0]
+            project = ""
+            for i, arg in enumerate(args):
+                if arg == "--project" and i + 1 < len(args):
+                    project = args[i + 1]
+                    break
+            if project:
+                return project, server_alias
     except (FileNotFoundError, json.JSONDecodeError, KeyError, OSError, IndexError):
-        return "", ""
+        pass
+    return _detect_from_registry(cwd)
 
 
 def _detect_project() -> str:
@@ -419,6 +560,16 @@ def _warn_project_mismatch(project: str) -> str:
         return ""
     return f"⚠ Project '{project}' tidak terdaftar di ~/.odin/projects/. Jalankan: odin project add"
 
+
+# Tool yang HANYA membaca → auto-allow. Guard dipasang dengan matcher luas
+# (mcp__odin__.*) supaya tool baru tak diam-diam lolos tanpa penilaian; daftar ini
+# yang memutuskan mana yang boleh jalan tanpa konfirmasi.
+READ_ONLY_TOOLS = (
+    "inspect_server", "run_tests", "rollback_plan", "audit_tail",
+    "runbook_templates", "cortex_events", "server_info", "tail_log",
+    "http_health_check", "memory_recall", "memory_digest", "memory_health",
+    "session_history",
+)
 
 _VALID_MODES = ("setup", "deploy", "production")
 
@@ -587,8 +738,9 @@ def main() -> None:
     mode = _get_mode()
     _prj, _srv = _detect_project_context()
 
-    if tool.endswith("inspect_server"):
-        emit("allow", "🟢 AMAN — inspect_server hanya membaca state server (read-only).")
+    for ro in READ_ONLY_TOOLS:
+        if tool.endswith(ro):
+            emit("allow", f"🟢 AMAN — {ro} bersifat read-only — dijalankan otomatis.")
 
     if tool.endswith("run_command"):
         cmd = ti.get("command", "") or ""
@@ -640,9 +792,6 @@ def main() -> None:
         card_lines.append(sep)
         emit("ask", "\n".join(card_lines))
 
-    if tool.endswith("run_tests"):
-        emit("allow", "🟢 AMAN — run_tests hanya membaca & menjalankan test suite.")
-
     if tool.endswith("memory_write"):
         ns = ti.get("ns", "?")
         key = ti.get("key", "") or "(auto)"
@@ -691,9 +840,6 @@ def main() -> None:
         ]
         emit("ask", "\n".join(card_lines))
 
-    if tool.endswith("cortex_events"):
-        emit("allow", "🟢 AMAN — cortex_events hanya membaca event journal (read-only).")
-
     if tool.endswith("runbook"):
         rb_name = ti.get("name", "?")
         rb_steps = ti.get("steps") or []
@@ -725,15 +871,6 @@ def main() -> None:
             card_lines.append(warn_text)
         card_lines.append(sep)
         emit("ask", "\n".join(card_lines))
-
-    if tool.endswith("rollback_plan"):
-        emit("allow", "🟢 AMAN — rollback_plan hanya membaca riwayat sesi (read-only).")
-
-    if tool.endswith("audit_tail"):
-        emit("allow", "🟢 AMAN — audit_tail hanya membaca audit log (read-only).")
-
-    if tool.endswith("runbook_templates"):
-        emit("allow", "🟢 AMAN — runbook_templates hanya menampilkan daftar template (read-only).")
 
     sys.exit(0)  # tool lain: tanpa pendapat
 

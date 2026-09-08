@@ -119,16 +119,28 @@ class TestErrorLesson(LearningBase):
 # Loop 2: Cross-Session Error Tracking
 # ===========================================================================
 class TestCrossSessionErrors(LearningBase):
-    def test_save_and_load_error_freq(self):
-        da._error_counts = {"db_conn": 3, "timeout": 1}
+    def test_save_and_load_error_freq_with_decay(self):
+        """Hitungan sesi lalu DIPARUH saat dimuat (decay), dan yang jatuh di
+        bawah 1 dilupakan — supaya `recurring` tak jadi status permanen."""
+        da._error_counts = {"db_conn": 4, "timeout": 1}
         da._save_error_freq()
         da._error_counts.clear()
         da._error_counts_at_start.clear()
         da._fold_invalidate()
         da._load_error_freq()
-        self.assertEqual(da._error_counts["db_conn"], 3)
-        self.assertEqual(da._error_counts["timeout"], 1)
-        self.assertEqual(da._error_counts_at_start["db_conn"], 3)
+        self.assertEqual(da._error_counts["db_conn"], 2)
+        self.assertNotIn("timeout", da._error_counts)   # 1 // 2 = 0 → dilupakan
+        self.assertEqual(da._error_counts_at_start["db_conn"], 2)
+
+    def test_noise_error_types_not_persisted(self):
+        """generic_failure/file_not_found tak boleh ikut jadi 'pelajaran'."""
+        da._error_counts = {"generic_failure": 9, "db_conn": 4}
+        da._save_error_freq()
+        da._error_counts.clear()
+        da._fold_invalidate()
+        da._load_error_freq()
+        self.assertNotIn("generic_failure", da._error_counts)
+        self.assertIn("db_conn", da._error_counts)
 
     def test_cross_session_recurring(self):
         da._error_counts = {"db_conn": 2}

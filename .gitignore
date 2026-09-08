@@ -1,8 +1,20 @@
+# ── State CLI di laptop ────────────────────────────────────────────────────
+# install.sh meng-clone repo ini ke ~/.odin, folder yang SAMA dengan state CLI
+# (kunci SSH, registry server/project, mode). Tanpa baris-baris ini, `git add -A`
+# di ~/.odin bisa meng-COMMIT PRIVATE KEY.
+keys/
+servers/
+projects/
+modes/
+ssh_config
+.odin_mode
+
 # Memory adalah data runtime di server — jangan commit isinya.
 memory/
 *.jsonl
 .venv/
 __pycache__/
+.DS_Store
 .pytest_cache/
 
 # AI tools & config (kecuali slash commands)

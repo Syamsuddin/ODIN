@@ -36,15 +36,20 @@ SENGAJA di luar PROJECT_ROOT agar tak kena sandbox run_command dan tak ikut
   SSH_PORT           22                               (default: 22)
   SSH_KEY            /path/private_key                (opsional)
   PROJECT_ROOT       /var/www/app                     (default cwd; TIDAK mengurung)
-  LOCK_CWD_TO_PROJECT 0 | 1                           (1 = kembalikan kurungan cwd lama)
+  LOCK_CWD_TO_PROJECT 0 | 1                           (1 = validasi argumen cwd saja)
   ALLOWED_LOG_DIRS   /var/log,/var/www,/home,/tmp     (folder yang boleh dibaca tail_log)
   DEFAULT_TIMEOUT    180   MAX_TIMEOUT 900             (detik)
   OUTPUT_LIMIT       20000                            (potong output panjang)
   AGENT_LOG_LEVEL    INFO
-  MEMORY_DIR         /home/odin/memory                (folder simpanan memory)
+  ODIN_ENV           production|staging|local         (sinyal mode; kosong = dari .env app)
+  MEMORY_DIR         <dir agent>/memory               (di-set run.sh: $ODIN_HOME/memory/<project>)
   MEMORY_MAX_TEXT    4000                             (panjang maks teks satu entry)
   MEMORY_MAX_ENTRIES 2000                             (batas entry hidup; lebih -> compaction)
+  MEMORY_MAX_BYTES   8388608                          (ukuran log; lebih -> compaction)
+  MEMORY_DEAD_RATIO  0.5                              (rasio record mati pemicu compaction)
+  LOG_ROTATE_BYTES   5242880                          (rotasi audit.jsonl & events.jsonl)
   AUDIT_ENABLED      1                                (0 = matikan audit log)
+  AUDIT_SYSLOG       1                                (0 = jangan cermin audit ke journald)
 =========================================================================
 
 Pasang:  pip install "mcp[cli]"
@@ -53,7 +58,7 @@ Jalan :  python3 odin_agent.py     (dijalankan otomatis oleh Claude Code via MCP
 
 from __future__ import annotations
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 
 import atexit
 import fcntl
@@ -103,7 +108,10 @@ PROJECT_ROOT = os.environ.get("PROJECT_ROOT", "").strip().rstrip("/")
 PROJECT_NAME = os.environ.get("PROJECT_NAME", "").strip()
 # Niat user: AKSES PENUH server. PROJECT_ROOT kini hanya DEFAULT cwd (di-set run.sh),
 # BUKAN pagar. Gerbang keamanan = konfirmasi WRITE + kartu risiko (PreToolUse hook) +
-# hard-block katastrofik di bawah. Set LOCK_CWD_TO_PROJECT=1 utk mengembalikan kurungan.
+# hard-block katastrofik di bawah.
+# LOCK_CWD_TO_PROJECT=1 memvalidasi ARGUMEN `cwd` saja — bukan konfinemen: `cd /etc`
+# di DALAM string command tetap jalan. Anggap ia pemeriksaan default-cwd, dan jangan
+# menjadikannya batas keamanan (batas sesungguhnya = hak user OS + sudoers).
 LOCK_CWD_TO_PROJECT = os.environ.get("LOCK_CWD_TO_PROJECT", "0").strip().lower() in ("1", "true", "yes")
 
 ALLOWED_LOG_DIRS = [
@@ -145,16 +153,46 @@ AUDIT_ENABLED = os.environ.get("AUDIT_ENABLED", "1").strip().lower() not in ("0"
 _DANGER_PATTERNS = [
     r"\brm\s+-rf\s+/(\s|$|\*)",       # rm -rf /  |  rm -rf /*
     r"\brm\s+-rf\s+~",
+    r"\brm\s+-rf\s+\.{1,2}(/\*)?\s*($|;|&)",   # cd / && rm -rf .
     r"\bmkfs\b",
     r"\bdd\b.*\bof=/dev/",
     r">\s*/dev/sd[a-z]",
     r":\(\)\s*\{",                     # fork bomb
-    r"\bshutdown\b", r"\breboot\b", r"\bhalt\b", r"\binit\s+0\b",
+    r"\bshutdown\b", r"\breboot\b", r"\bhalt\b", r"\bpoweroff\b",
+    r"\binit\s+0\b",
     r"\bchmod\s+-R\s+777\s+/",
     r"\bchown\s+-R\b.*\s/\s*$",
-    r"\bdrop\s+database\b", r"\bmysqladmin\b.*\bdrop\b",  # DB drop: rem darurat (approval ganda)
+    r"\bfind\s+/\s+[^|;]*-delete\b",      # find / -delete
+    # DB drop: rem darurat (approval ganda)
+    r"\bdrop\s+(database|schema)\b", r"\bmysqladmin\b.*\bdrop\b",
 ]
 _DANGER_RE = re.compile("|".join(_DANGER_PATTERNS), re.IGNORECASE)
+
+# Long-option → short. Tanpa normalisasi, `rm -fr /` dan
+# `rm --recursive --force /` lolos dari pola yang ditulis sebagai "rm -rf".
+# HARUS selaras dengan _normalize_flags di client/odin_guard.py.
+_FLAG_ALIASES = {"--recursive": "-r", "--force": "-f", "--dir": "-d",
+                 "--no-preserve-root": "-f"}
+
+
+def _normalize_flags(command: str) -> str:
+    """Samakan bentuk flag `rm` sebelum pencocokan pola katastrofik."""
+    s = command
+    for long_opt, short in _FLAG_ALIASES.items():
+        s = re.sub(rf"(?<![\w-]){re.escape(long_opt)}(?![\w-])", short, s)
+
+    def _fix(m: "re.Match") -> str:
+        flags = set(re.findall(r"[a-zA-Z]", m.group(1)))
+        head = "".join(f for f in "rf" if f in flags)
+        tail = "".join(sorted(flags - set("rf")))
+        return f"rm -{head}{tail} {m.group(2)}" if (head or tail) else f"rm {m.group(2)}"
+
+    return re.sub(r"\brm\s+((?:-[a-zA-Z]+\s+)+)(\S)", _fix, s)
+
+
+def _is_dangerous(command: str) -> bool:
+    """True bila perintah cocok pola katastrofik (setelah normalisasi flag)."""
+    return bool(_DANGER_RE.search(_normalize_flags(command)))
 
 # Pola nilai mirip-rahasia -> ditolak saat memory_write kecuali allow_secret=True.
 # Analog _DANGER_RE: jaring pengaman agar password/kunci tak masuk simpanan.
@@ -212,6 +250,19 @@ def _cache_get(command: str, cwd: str) -> dict | None:
     out["_cached"] = True
     out["_cache_age_sec"] = round(age, 1)
     return out
+
+
+def _cache_invalidate(command: str) -> None:
+    """Buang seluruh cache saat perintah ini MENGUBAH state.
+
+    Tanpa ini `cat f` → `sed -i ...` → `cat f` mengembalikan isi LAMA selama TTL —
+    ODIN akan yakin perubahannya tidak terjadi. Cache dibuang total (bukan per-key):
+    satu perintah tulis bisa memengaruhi output banyak perintah baca lain."""
+    if not _result_cache:
+        return
+    if _READ_ONLY_RE.match(command) and not _WRITE_CMDS_RE.search(command):
+        return
+    _result_cache.clear()
 
 
 def _cache_set(command: str, cwd: str, result: dict) -> None:
@@ -414,44 +465,142 @@ def _resolve_default_cwd(cwd: str) -> str | None:
     return PROJECT_ROOT if os.path.isdir(PROJECT_ROOT) else None
 
 
+class _BoundedBuffer:
+    """Tampung output perintah tanpa menyandera RAM.
+
+    `capture_output=True` menampung output TAK TERBATAS di memori sebelum dipotong;
+    satu `cat` file besar cukup untuk membunuh proses ODIN. Buffer ini hanya menyimpan
+    HEAD dan TAIL — bagian tengah dibuang saat mengalir."""
+
+    def __init__(self, limit: int):
+        self.limit = max(1024, limit)
+        self.head = bytearray()
+        self.tail = bytearray()
+        self.total = 0
+
+    def feed(self, chunk: bytes) -> None:
+        self.total += len(chunk)
+        if len(self.head) < self.limit:
+            take = self.limit - len(self.head)
+            self.head += chunk[:take]
+            chunk = chunk[take:]
+        if chunk:
+            self.tail += chunk
+            if len(self.tail) > self.limit:
+                del self.tail[:-self.limit]
+
+    def text(self) -> str:
+        # errors="replace": output non-UTF-8 (mysqldump, git log latin1) TIDAK boleh
+        # menjatuhkan perintah yang sebenarnya sukses.
+        head = self.head.decode("utf-8", "replace")
+        if self.total <= len(self.head):
+            return head
+        tail = self.tail.decode("utf-8", "replace")
+        dropped = self.total - len(self.head) - len(self.tail)
+        if dropped <= 0:
+            return head + tail
+        return f"{head}\n...[{dropped} byte dipotong]...\n{tail}"
+
+
+def _pump(stream, buf: "_BoundedBuffer") -> None:
+    try:
+        for chunk in iter(lambda: stream.read(65536), b""):
+            buf.feed(chunk)
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
+def _kill_tree(proc: "subprocess.Popen") -> None:
+    """Bunuh SELURUH process group. Membunuh `bash` saja meninggalkan orphan
+    (`composer install`, `npm ci`) yang terus jalan setelah timeout."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        proc.wait(timeout=3)
+        return
+    except Exception:
+        pass
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        proc.wait(timeout=3)
+    except Exception:
+        pass
+
+
+def _spawn(argv: list, timeout: int) -> tuple:
+    """Jalankan argv; kembalikan (stdout_buf, stderr_buf, returncode, timed_out)."""
+    half = max(1024, OUTPUT_LIMIT // 2)
+    out_buf, err_buf = _BoundedBuffer(half), _BoundedBuffer(half)
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            stdin=subprocess.DEVNULL, start_new_session=True)
+    threads = []
+    for stream, buf in ((proc.stdout, out_buf), (proc.stderr, err_buf)):
+        t = threading.Thread(target=_pump, args=(stream, buf), daemon=True)
+        t.start()
+        threads.append(t)
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _kill_tree(proc)
+    for t in threads:
+        t.join(timeout=5)
+    return out_buf, err_buf, proc.returncode, timed_out
+
+
 def _run(command: str, cwd: str | None = None, timeout: int = DEFAULT_TIMEOUT,
          allow_dangerous: bool = False) -> dict:
     timeout = max(1, min(int(timeout), MAX_TIMEOUT))
 
-    if not allow_dangerous and _DANGER_RE.search(command):
+    if not allow_dangerous and _is_dangerous(command):
+        msg = ("DITOLAK: cocok pola perintah berbahaya. "
+               "Set allow_dangerous=True hanya jika ini memang disengaja.")
         return {"success": False, "blocked": True, "exit_code": None,
-                "stdout": "", "command": command,
-                "stderr": "DITOLAK: cocok pola perintah berbahaya. "
-                          "Set allow_dangerous=True hanya jika ini memang disengaja."}
+                "stdout": "", "command": command, "stderr": msg, "error": msg}
 
     if LOCK_CWD_TO_PROJECT and PROJECT_ROOT and cwd and not _path_inside(cwd, [PROJECT_ROOT]):
+        msg = (f"cwd '{cwd}' di luar PROJECT_ROOT ({PROJECT_ROOT}). "
+               f"(LOCK_CWD_TO_PROJECT aktif — akses penuh dimatikan.)")
         return {"success": False, "exit_code": None, "stdout": "", "command": command,
-                "stderr": f"cwd '{cwd}' di luar PROJECT_ROOT ({PROJECT_ROOT}). "
-                          f"(LOCK_CWD_TO_PROJECT aktif — akses penuh dimatikan.)"}
+                "stderr": msg, "error": msg}
 
     try:
         argv = _build_invocation(command, cwd)
     except Exception as e:
         return {"success": False, "exit_code": None, "stdout": "",
-                "stderr": f"Konfigurasi salah: {e}", "command": command}
+                "stderr": f"Konfigurasi salah: {e}", "error": f"Konfigurasi salah: {e}",
+                "command": command}
 
     log.info("RUN (%s) cwd=%s :: %s", MODE, cwd or "-", command)
     start = time.monotonic()
+    _cache_invalidate(command)
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-        return {"success": proc.returncode == 0, "exit_code": proc.returncode,
-                "stdout": _truncate(proc.stdout), "stderr": _truncate(proc.stderr),
-                "duration_sec": round(time.monotonic() - start, 2),
-                "mode": MODE, "command": command}
-    except subprocess.TimeoutExpired as e:
-        return {"success": False, "timeout": True, "exit_code": None,
-                "stdout": _truncate(e.stdout if isinstance(e.stdout, str) else ""),
-                "stderr": f"TIMEOUT setelah {timeout}s. "
-                          f"{_truncate(e.stderr if isinstance(e.stderr, str) else '')}",
-                "duration_sec": timeout, "command": command}
+        out_buf, err_buf, rc, timed_out = _spawn(argv, timeout)
     except Exception as e:
         return {"success": False, "exit_code": None, "stdout": "",
-                "stderr": f"ERROR: {e}", "command": command}
+                "stderr": f"ERROR: {e}", "error": f"ERROR: {e}", "command": command}
+    stdout, stderr = out_buf.text(), err_buf.text()
+    if timed_out:
+        return {"success": False, "timeout": True, "exit_code": None,
+                "stdout": stdout,
+                "stderr": f"TIMEOUT setelah {timeout}s (proses & seluruh child-nya "
+                          f"dimatikan). {stderr}",
+                "duration_sec": round(time.monotonic() - start, 2), "command": command}
+    return {"success": rc == 0, "exit_code": rc,
+            "stdout": stdout, "stderr": stderr,
+            "duration_sec": round(time.monotonic() - start, 2),
+            "mode": MODE, "command": command}
 
 
 # ---------------------------------------------------------------------------
@@ -551,10 +700,18 @@ _ERROR_PATTERNS = [
 _error_counts: dict[str, int] = {}
 
 
-def _analyze_output(result: dict) -> dict:
+# error_type yang TIDAK layak jadi pelajaran: terlalu umum & sering muncul dari
+# operasi normal (grep tanpa hasil, `test -f` yang gagal, path dicek dulu).
+_NON_LEARNABLE_ERRORS = frozenset({"generic_failure", "file_not_found"})
+
+
+def _analyze_output(result: dict, force: bool = False) -> dict:
     """Scan stdout+stderr untuk pola error umum. Kembalikan hints + suggested_commands
-    untuk Claude. Lacak frekuensi error per-session; tandai jika berulang."""
-    if result.get("success"):
+    untuk Claude. Lacak frekuensi error per-session; tandai jika berulang.
+
+    force=True: analisis tetap dijalankan meski exit code 0 (dipakai tail_log —
+    log berisi stack trace tetap exit 0)."""
+    if result.get("success") and not force:
         return {}
     hints: list[str] = []
     suggestions: list[dict] = []
@@ -572,7 +729,7 @@ def _analyze_output(result: dict) -> dict:
                     if len(entry) > 3 and entry[3]:
                         suggestions = entry[3]
                 hints.append(hint)
-    if not hints and result.get("exit_code") and result["exit_code"] > 0:
+    if not hints and not force and result.get("exit_code") and result["exit_code"] > 0:
         hints.append(f"Exit code {result['exit_code']}. Baca stderr untuk diagnosis.")
         error_type = error_type or "generic_failure"
     if not hints:
@@ -580,7 +737,9 @@ def _analyze_output(result: dict) -> dict:
     analysis: dict = {"error_type": error_type, "hints": hints}
     if suggestions:
         analysis["suggested_commands"] = suggestions
-    if error_type:
+    # Frekuensi hanya dihitung untuk KEGAGALAN nyata. Dengan force=True (tail_log)
+    # perintahnya sukses — pola di dalam log bukan bukti error berulang di ODIN.
+    if error_type and error_type not in _NON_LEARNABLE_ERRORS and not result.get("success"):
         _error_counts[error_type] = _error_counts.get(error_type, 0) + 1
         if _error_counts[error_type] >= 3:
             analysis["recurring"] = True
@@ -670,6 +829,34 @@ def _slim(result: dict, command: str) -> dict:
 # Berbeda dari memory (yang di-fold/compact), audit log adalah catatan
 # kronologis permanen untuk investigasi insiden.
 # ---------------------------------------------------------------------------
+LOG_ROTATE_BYTES = int(os.environ.get("LOG_ROTATE_BYTES", str(5 * 1024 * 1024)))
+
+
+def _rotate_if_big(path: str, keep: int = 2) -> None:
+    """Rotasi berkas append-only: <path> → <path>.1 → <path>.2 (sisanya dibuang).
+
+    audit.jsonl & events.jsonl tak pernah dirotasi dan dibaca PENUH tiap panggilan
+    orchestrator/audit_tail — pada server yang lama hidup ini jadi beban I/O tetap
+    yang terus tumbuh."""
+    try:
+        if os.path.getsize(path) < LOG_ROTATE_BYTES:
+            return
+    except OSError:
+        return
+    try:
+        oldest = f"{path}.{keep}"
+        if os.path.exists(oldest):
+            os.unlink(oldest)
+        for i in range(keep - 1, 0, -1):
+            src = f"{path}.{i}"
+            if os.path.exists(src):
+                os.replace(src, f"{path}.{i + 1}")
+        os.replace(path, f"{path}.1")
+        log.info("rotasi log: %s", path)
+    except OSError:
+        log.debug("rotasi %s gagal", path, exc_info=True)
+
+
 def _audit(tool: str, summary: str, result: dict) -> None:
     if not AUDIT_ENABLED:
         return
@@ -682,14 +869,35 @@ def _audit(tool: str, summary: str, result: dict) -> None:
     }
     try:
         os.makedirs(MEMORY_DIR, mode=0o700, exist_ok=True)
+        _rotate_if_big(AUDIT_FILE)
         line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
         fd = os.open(AUDIT_FILE, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
             os.write(fd, line.encode("utf-8"))
         finally:
             os.close(fd)
+        _audit_to_syslog(record)
     except Exception:
         log.warning("gagal tulis audit log", exc_info=True)
+
+
+def _audit_to_syslog(record: dict) -> None:
+    """Salin audit ke journald/syslog.
+
+    audit.jsonl milik user `odin` dan bisa di-truncate lewat `run_command` yang
+    sama — artinya principal yang diaudit bisa menghapus jejaknya. Salinan di
+    journald tak bisa disentuh user odin, jadi forensik pasca-insiden tetap punya
+    sumber kedua. Matikan dengan AUDIT_SYSLOG=0."""
+    if os.environ.get("AUDIT_SYSLOG", "1").strip().lower() in ("0", "false", "no"):
+        return
+    try:
+        import syslog
+        syslog.openlog("odin", syslog.LOG_PID, syslog.LOG_AUTHPRIV)
+        syslog.syslog(syslog.LOG_NOTICE,
+                      json.dumps(record, ensure_ascii=False, separators=(",", ":"))[:900])
+        syslog.closelog()
+    except Exception:
+        log.debug("audit syslog gagal", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -880,14 +1088,30 @@ def _ensure_store() -> None:
         os.close(fd)
 
 
+def _needs_newline(fd: int) -> bool:
+    """True bila file tidak kosong dan byte terakhirnya bukan '\n'.
+
+    Crash di tengah tulis meninggalkan baris tanpa newline; append berikutnya
+    menyambung ke baris itu dan KEDUA record gugur di json.loads."""
+    try:
+        size = os.fstat(fd).st_size
+        if size == 0:
+            return False
+        return os.pread(fd, 1, size - 1) != b"\n"
+    except OSError:
+        return False
+
+
 def _mem_append(record: dict) -> None:
     """Tulis satu record sebagai satu baris JSON. O_APPEND + flock = aman konkuren."""
     _ensure_store()
     _fold_invalidate()
     line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
-    fd = os.open(MEMORY_FILE, os.O_WRONLY | os.O_APPEND)
+    fd = os.open(MEMORY_FILE, os.O_RDWR | os.O_APPEND)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
+        if _needs_newline(fd):
+            os.write(fd, b"\n")
         os.write(fd, line.encode("utf-8"))
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
@@ -905,23 +1129,40 @@ def _is_expired(rec: dict, now: datetime) -> bool:
 
 
 _fold_cache: dict[str, dict] | None = None
+_fold_stamp: tuple | None = None
+_fold_total_records: int = 0    # jumlah record MENTAH pada fold terakhir
+
+
+def _file_stamp(path: str) -> tuple:
+    """(mtime_ns, size) — sidik jari murah untuk mendeteksi perubahan file."""
+    try:
+        st = os.stat(path)
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return (0, 0)
 
 
 def _fold_invalidate() -> None:
-    global _fold_cache
+    global _fold_cache, _fold_stamp
     _fold_cache = None
+    _fold_stamp = None
 
 
 def _mem_fold() -> dict[str, dict]:
     """Baca seluruh log, lipat jadi state terkini per id (last-write-wins).
     Buang record ber-deleted=True dan yang sudah kedaluwarsa.
-    Hasil di-cache dalam sesi; invalidasi otomatis saat append/compact."""
-    global _fold_cache
-    if _fold_cache is not None:
+
+    Cache di-invalidasi saat append/compact oleh proses ini SENDIRI, dan juga saat
+    (mtime,size) file berubah — tanpa itu sesi A tak pernah melihat instruksi baru
+    yang ditulis sesi B pada project yang sama."""
+    global _fold_cache, _fold_stamp, _fold_total_records
+    if _fold_cache is not None and _fold_stamp == _file_stamp(MEMORY_FILE):
         return _fold_cache
     if not os.path.exists(MEMORY_FILE):
         _fold_cache = {}
+        _fold_stamp = _file_stamp(MEMORY_FILE)
         return _fold_cache
+    _fold_stamp = _file_stamp(MEMORY_FILE)
     state: dict[str, dict] = {}
     with open(MEMORY_FILE, "r", encoding="utf-8") as f:
         fcntl.flock(f.fileno(), fcntl.LOCK_SH)
@@ -940,24 +1181,74 @@ def _mem_fold() -> dict[str, dict]:
         finally:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     now = datetime.now(timezone.utc)
-    _fold_cache = {rid: r for rid, r in state.items()
-                   if not r.get("deleted") and not _is_expired(r, now)}
+    _fold_total_records = len(state)
+    live = {rid: r for rid, r in state.items()
+            if not r.get("deleted") and not _is_expired(r, now)}
+    # Compaction menulis ulang file → jalankan SEBELUM cache diset, lalu ambil
+    # stamp yang baru (kalau tidak, cache langsung dianggap basi tiap panggilan).
+    _maybe_compact(live)
+    _fold_cache = live
+    _fold_stamp = _file_stamp(MEMORY_FILE)
     return _fold_cache
 
 
+MEMORY_MAX_BYTES = int(os.environ.get("MEMORY_MAX_BYTES", str(8 * 1024 * 1024)))
+MEMORY_DEAD_RATIO = float(os.environ.get("MEMORY_DEAD_RATIO", "0.5"))
+
+
 def _mem_compact(live: dict[str, dict]) -> None:
-    """Tulis ulang log hanya berisi record hidup (atomic via temp + os.replace)."""
+    """Tulis ulang log hanya berisi record hidup.
+
+    Atomik & aman konkuren: mkstemp di DIREKTORI YANG SAMA (rename lintas-filesystem
+    tidak atomik) + LOCK_EX selama penulisan, supaya sesi lain tak menyisipkan
+    append di antara baca-dan-ganti."""
     _ensure_store()
     _fold_invalidate()
-    tmp = MEMORY_FILE + ".tmp"
-    fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=MEMORY_DIR, prefix=".memory-", suffix=".tmp")
+    lock_fd = os.open(MEMORY_FILE, os.O_RDWR)
     try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        os.fchmod(fd, 0o600)
         for rec in live.values():
             os.write(fd, (json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
-    finally:
+        os.fsync(fd)
         os.close(fd)
-    os.replace(tmp, MEMORY_FILE)
+        fd = -1
+        os.replace(tmp, MEMORY_FILE)
+        tmp = ""
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if tmp and os.path.exists(tmp):
+            os.unlink(tmp)
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
     log.info("memory compacted -> %d entri hidup", len(live))
+
+
+def _maybe_compact(live: dict[str, dict]) -> None:
+    """Compact bila log didominasi record MATI atau berkasnya membengkak.
+
+    Pemicu lama (`entri HIDUP > MEMORY_MAX_ENTRIES`) tak pernah tercapai lewat
+    upsert — id-nya tetap, hanya versi lamanya menumpuk — sehingga histori mati
+    (stack-profile, metrics-history, error-freq tiap startup) tumbuh tanpa batas."""
+    try:
+        size = os.path.getsize(MEMORY_FILE)
+    except OSError:
+        return
+    total = _fold_total_records
+    dead = max(0, total - len(live))
+    too_dead = total >= 200 and dead / max(1, total) > MEMORY_DEAD_RATIO
+    too_big = size > MEMORY_MAX_BYTES
+    too_many = len(live) > MEMORY_MAX_ENTRIES
+    if not (too_dead or too_big or too_many):
+        return
+    log.info("memory compaction dipicu (total=%d dead=%d size=%d)", total, dead, size)
+    try:
+        _mem_compact(live)
+    except Exception:
+        log.debug("compaction gagal", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1058,6 +1349,7 @@ def _event_append(project: str, event: str, detail: str,
         "event": event, "detail": detail[:500],
         "severity": severity,
     }
+    _rotate_if_big(GLOBAL_EVENTS_FILE)
     line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
     fd = os.open(GLOBAL_EVENTS_FILE, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
@@ -1125,7 +1417,12 @@ def _enrich_context(tool_name: str, args: dict) -> list[dict]:
         all_items = list(_cortex_fold().values()) + list(_mem_fold().values())
     except Exception:
         return []
-    relevant = [r for r in all_items if r.get("ns") in ("instruction", "cross")]
+    # Lesson hasil auto-learning disimpan di ns `server` dengan tag `error-lesson`.
+    # Sebelumnya hanya ns instruction/cross yang di-recall → lesson tak pernah
+    # kembali ke konteks, sehingga loop belajar tak pernah tertutup.
+    relevant = [r for r in all_items
+                if r.get("ns") in ("instruction", "cross")
+                or "error-lesson" in (r.get("tags") or [])]
     if not relevant:
         return []
     terms_set = set(terms)
@@ -1268,7 +1565,13 @@ def _load_error_freq() -> None:
         if rec:
             data = json.loads(rec.get("text", "{}"))
             if isinstance(data, dict):
-                _error_counts = {k: v for k, v in data.items() if isinstance(v, int)}
+                # DECAY: hitungan sesi lalu diparuh saat dimuat. Tanpa ini counter
+                # bersifat seumur hidup — setelah tiga kegagalan sekali seumur
+                # hidup, SETIAP kegagalan berikutnya jadi `recurring` selamanya
+                # dan menulis lesson tiap sesi.
+                _error_counts = {k: v // 2 for k, v in data.items()
+                                 if isinstance(v, int) and v // 2 >= 1
+                                 and k not in _NON_LEARNABLE_ERRORS}
                 _error_counts_at_start = dict(_error_counts)
                 if _error_counts:
                     log.info("Loaded cross-session error freq: %d types", len(_error_counts))
@@ -1821,7 +2124,9 @@ def _inspect_app(app_path: str) -> dict | None:
         f"echo '@@STORAGE@@'; test -w {ap}/storage && echo yes || echo no; "
         f"echo '@@GIT@@'; cd {ap} 2>/dev/null && git log --oneline -1 2>/dev/null || echo none; "
         f"echo '@@BRANCH@@'; cd {ap} 2>/dev/null && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo none; "
-        f"echo '@@DIRTY@@'; cd {ap} 2>/dev/null && git status --porcelain 2>/dev/null | wc -l || echo 0",
+        f"echo '@@DIRTY@@'; cd {ap} 2>/dev/null && git status --porcelain 2>/dev/null | wc -l || echo 0; "
+        f"echo '@@APPENV@@'; grep -m1 -E '^APP_ENV=' {ap}/.env 2>/dev/null "
+        f"| cut -d= -f2 | tr -d '\"' || echo unknown",
         None, 15)
     s = _parse_sections(r.get("stdout", ""))
     if s.get("EXISTS") != "yes":
@@ -1842,6 +2147,8 @@ def _inspect_app(app_path: str) -> dict | None:
         "git_branch": s.get("BRANCH") if s.get("BRANCH") != "none" else None,
         "git_commit": s.get("GIT") if s.get("GIT") != "none" else None,
         "git_dirty": int(s.get("DIRTY", "0").strip() or "0"),
+        # Sinyal lingkungan EKSPLISIT — satu-satunya dasar mode production.
+        "app_env": (s.get("APPENV") or "unknown").strip().lower() or "unknown",
     }
 
 
@@ -1888,6 +2195,24 @@ def _full_inspect() -> dict:
     return profile
 
 
+# Nilai APP_ENV yang berarti "ini benar-benar produksi".
+_PRODUCTION_ENV_VALUES = {"production", "prod", "live"}
+
+
+def _is_production_signal(profile: dict) -> bool:
+    """Sinyal EKSPLISIT bahwa server ini produksi.
+
+    Uptime BUKAN sinyal lingkungan: VPS staging yang hidup 8 hari bukan produksi.
+    Aturan lama (`uptime > 7 && disk < 80`) membuat staging kehilangan
+    laravel_deploy dan apt/npm/pip install, lalu keputusan itu di-cache 1 jam.
+    Sekarang production hanya datang dari APP_ENV=production di .env aplikasi,
+    ODIN_ENV=production di environment, atau override manual di memory."""
+    if os.environ.get("ODIN_ENV", "").strip().lower() in _PRODUCTION_ENV_VALUES:
+        return True
+    app = profile.get("app") or {}
+    return (app.get("app_env") or "").strip().lower() in _PRODUCTION_ENV_VALUES
+
+
 def _derive_mode(profile: dict) -> str:
     """Tentukan mode operasi dari profile server."""
     fold = _mem_fold()
@@ -1897,9 +2222,6 @@ def _derive_mode(profile: dict) -> str:
     stype = profile.get("type", "general")
     stacks = profile.get("stacks", {})
     app = profile.get("app")
-    base = profile.get("base", {})
-    up = base.get("uptime_days", 0)
-    disk = base.get("disk_pct", 100)
     if stype == "web-app":
         if not stacks.get("web") or not stacks.get("runtime"):
             return "setup"
@@ -1907,26 +2229,17 @@ def _derive_mode(profile: dict) -> str:
             return "setup"
         if app and app.get("exists") and (not app.get("env_exists") or not app.get("vendor_exists")):
             return "setup"
-        web_ok = stacks.get("web", {}).get("status") == "active"
-        fpm = stacks.get("runtime", {}).get("fpm", "")
-        fpm_ok = fpm not in ("not-running", "none", "")
-        if web_ok and fpm_ok and up > 7 and disk < 80:
-            return "production"
-        return "deploy"
+        return "production" if _is_production_signal(profile) else "deploy"
     if stype == "database":
         db = stacks.get("database", {})
         if not db or db.get("status") not in ("active", "running"):
             return "setup"
-        if up > 7:
-            return "production"
-        return "deploy"
+        return "production" if _is_production_signal(profile) else "deploy"
     if stype == "container":
         docker = stacks.get("docker", {})
         if not docker or docker.get("status") not in ("active", "running"):
             return "setup"
-        if docker.get("running_count", 0) > 0 and up > 7:
-            return "production"
-        return "deploy"
+        return "production" if _is_production_signal(profile) else "deploy"
     return "deploy"
 
 
@@ -2022,11 +2335,13 @@ def _compute_trend(current: dict, history: list[dict]) -> dict:
 # MODE ENFORCEMENT: batasi operasi berdasarkan mode
 # ---------------------------------------------------------------------------
 _PRODUCTION_BLOCKED_TOOLS = {"laravel_deploy"}
+# (?:-\S+\s+)* — flag boleh mendahului sub-perintah. Tanpa ini `apt -y install nginx`
+# lolos dari gerbang mode production hanya karena urutan flag berbeda.
 _PRODUCTION_BLOCKED_CMDS = [
-    r"\bapt(?:-get)?\s+(install|remove|purge|upgrade|dist-upgrade)\b",
-    r"\bdpkg\s+(-i|--install|-r|--remove)\b",
-    r"\bpip3?\s+install\b",
-    r"\bnpm\s+(install|ci)\b",
+    r"\bapt(?:-get)?\s+(?:-\S+\s+)*(install|remove|purge|upgrade|dist-upgrade)\b",
+    r"\bdpkg\s+(?:-\S+\s+)*(-i|--install|-r|--remove)\b",
+    r"\bpip3?\s+(?:-\S+\s+)*install\b",
+    r"\bnpm\s+(?:-\S+\s+)*(install|ci)\b",
 ]
 
 
@@ -2187,15 +2502,36 @@ def _assert_server_identity() -> None:
 _assert_server_identity()
 
 
-# Inspeksi saat startup (lewati jika ODIN_SKIP_INSPECT=1, mis. saat testing)
+def _background_inspect() -> None:
+    """Inspeksi penuh di thread latar — TIDAK boleh memblokir handshake MCP.
+
+    Dulu `_full_inspect()` (4 perintah serial, timeout 30+15+30+15 detik, termasuk
+    `certbot certificates`, `php -m`, `systemctl list-units`, `git status`) jalan
+    saat import, SEBELUM FastMCP dibangun. Batas koneksi MCP Claude Code (30 detik)
+    jauh di bawah kasus terburuk itu → server gagal connect. Sekarang sesi langsung
+    hidup dengan profil cache/unknown; hasil segar dipakai begitu selesai dan
+    tersimpan di memory untuk sesi berikutnya."""
+    global _PROFILE, _CURRENT_MODE
+    try:
+        prof = _full_inspect()
+    except Exception as e:
+        log.warning("inspeksi latar gagal: %s — mode tetap %s", e, _CURRENT_MODE)
+        return
+    _PROFILE = prof
+    _CURRENT_MODE = prof.get("mode", _CURRENT_MODE)
+    log.info("inspeksi latar selesai: type=%s mode=%s",
+             prof.get("type", "?"), _CURRENT_MODE)
+
+
+# Inspeksi saat startup (lewati jika ODIN_SKIP_INSPECT=1, mis. saat testing).
+# Cache segar → dipakai langsung (murah). Tidak ada cache → inspeksi DIJADWALKAN
+# di latar setelah FastMCP siap; sesi tetap hidup dengan mode default `deploy`.
+_NEED_INSPECT = False
 if os.environ.get("ODIN_SKIP_INSPECT", "").strip() in ("1", "true", "yes"):
     log.info("ODIN_SKIP_INSPECT=1 — inspeksi dilewati")
 elif not _try_cached_startup():
-    try:
-        _PROFILE = _full_inspect()
-        _CURRENT_MODE = _PROFILE.get("mode", "deploy")
-    except Exception as e:
-        log.warning("inspeksi startup gagal: %s — fallback mode=deploy", e)
+    _NEED_INSPECT = True
+    log.info("profil belum ada/kadaluwarsa — inspeksi dijadwalkan di latar")
 
 # Catat niat web-root SEBELUM membangun instructions agar muncul di memory digest.
 _seed_web_root_note()
@@ -2221,6 +2557,10 @@ finally:
         except OSError:
             pass
 _load_error_freq()
+
+if _NEED_INSPECT:
+    threading.Thread(target=_background_inspect, daemon=True,
+                     name="odin-inspect").start()
 
 
 def _shutdown_save():
@@ -2303,10 +2643,20 @@ def tail_log(path: str, lines: int = 100, grep: str = "") -> dict:
     norm = os.path.normpath(path)
     cmd = f"tail -n {n} {shlex.quote(norm)}"
     if grep:
-        cmd += f" | grep -i -- {shlex.quote(grep)} || true"
+        # `tail <file-hilang> | grep x || true` exit 0 → kegagalan baca file
+        # terlaporkan SUKSES. PIPESTATUS memisahkan keduanya: kegagalan `tail`
+        # diteruskan, sedangkan grep exit 1 ("tak ada baris cocok") bukan error.
+        cmd = (f"{cmd} | grep -i -- {shlex.quote(grep)}\n"
+               f"rc_tail=${{PIPESTATUS[0]}}; rc_grep=${{PIPESTATUS[1]}}\n"
+               f"[ $rc_tail -ne 0 ] && exit $rc_tail\n"
+               f"[ $rc_grep -gt 1 ] && exit $rc_grep\n"
+               f"exit 0")
     result = _run(cmd, None, 60)
     result = _smart_output(result)
-    analysis = _analyze_output(result)
+    # Analisis pola error dijalankan pada ISI LOG, bukan hanya saat exit != 0 —
+    # `tail` yang berhasil selalu exit 0, sehingga alur "tail_log → deteksi
+    # SQLSTATE" tak pernah terpicu bila hanya bergantung exit code.
+    analysis = _analyze_output(result, force=True)
     if analysis:
         result["_analysis"] = analysis
     _audit("tail_log", f"{path} lines={n} grep={grep!r}", result)
@@ -2327,9 +2677,13 @@ def service_action(service: str, action: str = "status") -> dict:
     """
     actions = {"status", "is-active", "is-enabled", "reload", "restart", "start", "stop"}
     if action not in actions:
-        return {"success": False, "stderr": f"action tidak dikenal. Pilih: {sorted(actions)}"}
+        msg = f"action tidak dikenal. Pilih: {sorted(actions)}"
+        return {"success": False, "error": msg, "stderr": msg, "exit_code": None,
+                "stdout": ""}
     if not re.fullmatch(r"[A-Za-z0-9._@-]+", service):
-        return {"success": False, "stderr": "Nama service tidak valid."}
+        msg = "Nama service tidak valid."
+        return {"success": False, "error": msg, "stderr": msg, "exit_code": None,
+                "stdout": ""}
     sudo = "" if action in {"status", "is-active", "is-enabled"} else "sudo -n "
     pager = " --no-pager" if action == "status" else ""
     cmd = f"{sudo}systemctl {action} {shlex.quote(service)}{pager}"
@@ -2610,12 +2964,21 @@ def http_health_check(url: str, expect_status: int = 200, timeout: int = 30) -> 
         expect_status: status HTTP yang diharapkan (default 200).
     """
     if not re.match(r"^https?://", url):
-        return {"success": False, "stderr": "URL harus diawali http:// atau https://"}
-    fmt = "HTTPSTATUS:%{http_code} TIME:%{time_total}s SIZE:%{size_download}"
-    r = _run(f"curl -sS -o /dev/null -m {int(timeout)} -w {shlex.quote(fmt)} {shlex.quote(url)}",
+        msg = "URL harus diawali http:// atau https://"
+        return {"success": False, "error": msg, "stderr": msg, "exit_code": None,
+                "stdout": ""}
+    fmt = "\nHTTPSTATUS:%{http_code} TIME:%{time_total}s SIZE:%{size_download}"
+    # Body IKUT diambil (dipotong 2000 byte) — status saja tak cukup untuk
+    # mendiagnosis 500 dari Laravel/nginx.
+    r = _run(f"curl -sS -m {int(timeout)} -w {shlex.quote(fmt)} {shlex.quote(url)} "
+             f"| head -c 2200",
              None, timeout + 10)
-    m = re.search(r"HTTPSTATUS:(\d+)", r.get("stdout", "") or "")
+    raw = r.get("stdout", "") or ""
+    m = re.search(r"HTTPSTATUS:(\d+)", raw)
     status = int(m.group(1)) if m else None
+    body = raw[:m.start()] if m else raw
+    r["body"] = body[:2000]
+    r["stdout"] = raw[m.start():] if m else raw
     r["http_status"] = status
     r["matches_expected"] = status == expect_status
     r["success"] = status == expect_status
@@ -3106,6 +3469,54 @@ def memory_digest() -> dict:
             "project_file": MEMORY_FILE}
 
 
+_DUP_THRESHOLD = 0.4
+_DUP_MAX_PAIRS = 20000          # batas keras jumlah pasangan yang dinilai
+_DUP_COMMON_TOKEN = 40          # token yang muncul di >N entry diabaikan
+
+
+def _find_duplicate_pairs(items: list[dict]) -> list[dict]:
+    """Cari pasangan entry mirip TANPA membandingkan semua-lawan-semua.
+
+    Versi lama O(n²) dan mem-tokenisasi ulang kedua teks di SETIAP pasangan;
+    pada memory yang besar `memory_health` jadi mahal. Sekarang: tokenisasi sekali
+    per entry, lalu hanya pasangan yang BERBAGI token (indeks terbalik) yang dinilai."""
+    token_sets = [set(_tokenize(f"{r.get('key') or ''} {r.get('text') or ''}"))
+                  for r in items]
+    index: dict[str, list[int]] = {}
+    for i, toks in enumerate(token_sets):
+        for t in toks:
+            index.setdefault(t, []).append(i)
+
+    candidates: set[tuple] = set()
+    for idxs in index.values():
+        if len(idxs) > _DUP_COMMON_TOKEN:
+            continue            # token generik ("server", "deploy") → tak informatif
+        for a_pos in range(len(idxs)):
+            for b_pos in range(a_pos + 1, len(idxs)):
+                candidates.add((idxs[a_pos], idxs[b_pos]))
+        if len(candidates) >= _DUP_MAX_PAIRS:
+            break
+
+    duplicates: list[dict] = []
+    for i, j in candidates:
+        a, b = items[i], items[j]
+        if a.get("ns") != b.get("ns") or a.get("id") == b.get("id"):
+            continue
+        ta, tb = token_sets[i], token_sets[j]
+        union = ta | tb
+        if not union:
+            continue
+        overlap = len(ta & tb) / len(union)
+        if overlap >= _DUP_THRESHOLD:
+            duplicates.append({
+                "entry_a": {"id": a.get("id"), "text": (a.get("text") or "")[:60]},
+                "entry_b": {"id": b.get("id"), "text": (b.get("text") or "")[:60]},
+                "overlap": round(overlap, 2),
+            })
+    duplicates.sort(key=lambda x: x["overlap"], reverse=True)
+    return duplicates
+
+
 @mcp.tool()
 def memory_health() -> dict:
     """Diagnostik kesehatan memory (cortex + project): jumlah per namespace, entry basi,
@@ -3139,26 +3550,7 @@ def memory_health() -> dict:
                 "age_days": age_days,
             })
 
-    duplicates: list[dict] = []
-    seen_pairs: set[tuple] = set()
-    for i, a in enumerate(all_items):
-        for b in all_items[i + 1:]:
-            if a.get("ns") != b.get("ns") or a.get("id") == b.get("id"):
-                continue
-            pair = tuple(sorted((a["id"], b["id"])))
-            if pair in seen_pairs:
-                continue
-            text_a = f"{a.get('key') or ''} {a.get('text') or ''}"
-            text_b = f"{b.get('key') or ''} {b.get('text') or ''}"
-            overlap = _word_overlap(text_a, text_b)
-            if overlap >= 0.4:
-                seen_pairs.add(pair)
-                duplicates.append({
-                    "entry_a": {"id": a.get("id"), "text": (a.get("text") or "")[:60]},
-                    "entry_b": {"id": b.get("id"), "text": (b.get("text") or "")[:60]},
-                    "overlap": round(overlap, 2),
-                })
-    duplicates.sort(key=lambda x: x["overlap"], reverse=True)
+    duplicates = _find_duplicate_pairs(all_items)
 
     project_size = 0
     cortex_size = 0
@@ -3313,6 +3705,30 @@ def health_live() -> str:
     return "\n".join(lines)
 
 
+def _is_odin_process(pid: int) -> bool:
+    """True HANYA bila PID itu benar-benar proses odin_agent.py.
+
+    Dipakai singleton sebelum mengirim sinyal. PID file selamat dari reboot dan
+    PID dipakai ulang OS — tanpa verifikasi ini, singleton bisa mengirim SIGKILL
+    ke proses sembarang milik UID yang sama."""
+    if pid <= 0:
+        return False
+    if os.path.isdir("/proc"):          # Linux (server sungguhan)
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                return b"odin_agent.py" in f.read()
+        except FileNotFoundError:
+            return False                # PID sudah tak ada
+        except OSError:
+            pass                        # tak terbaca → coba jalur ps
+    try:    # non-Linux (mis. macOS saat dev/test): fallback ke `ps`
+        out = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                             capture_output=True, text=True, timeout=5).stdout
+        return "odin_agent.py" in out
+    except Exception:
+        return False
+
+
 if __name__ == "__main__":
     # ── Singleton: bunuh instance lama agar tidak menumpuk ───────────────
     # Setiap sesi MCP (SSH baru) men-spawn odin_agent.py baru. Tanpa guard,
@@ -3331,15 +3747,24 @@ if __name__ == "__main__":
     try:
         with open(_PIDFILE) as _f:
             _old_pid = int(_f.read().strip())
-        if _old_pid != os.getpid():
+        if _old_pid != os.getpid() and _is_odin_process(_old_pid):
             try:
                 os.kill(_old_pid, signal.SIGTERM)
                 log.info("singleton: SIGTERM → PID %d", _old_pid)
-                time.sleep(1.5)
-                os.kill(_old_pid, signal.SIGKILL)   # paksa jika belum mati
-                log.info("singleton: SIGKILL → PID %d", _old_pid)
+                # Beri kesempatan selesai (deploy/migrate di tengah jalan) sebelum
+                # dipaksa. Cek berkala, bukan sleep buta lalu SIGKILL.
+                for _ in range(30):                 # maks ~15 detik
+                    time.sleep(0.5)
+                    if not _is_odin_process(_old_pid):
+                        break
+                else:
+                    os.kill(_old_pid, signal.SIGKILL)
+                    log.warning("singleton: SIGKILL → PID %d (tak mau berhenti)", _old_pid)
             except ProcessLookupError:
                 pass  # sudah mati duluan — lanjut
+        elif _old_pid != os.getpid():
+            log.info("singleton: PID %d bukan proses ODIN (PID file basi) — diabaikan",
+                     _old_pid)
     except (FileNotFoundError, ValueError):
         pass  # belum ada PID file — first run
 

@@ -13,8 +13,16 @@ PROJECTS_DIR="$ODIN_HOME/projects"
 PROJECT=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --project) PROJECT="$2"; shift 2 ;;
-    *) shift ;;
+    --project)
+      PROJECT="$2"
+      if [[ -z "$PROJECT" || "$PROJECT" =~ [^A-Za-z0-9._-] ]]; then
+          echo "FATAL: nama project tidak valid: '${PROJECT}'" >&2
+          exit 1
+      fi
+      shift 2 ;;
+    *)
+      echo "FATAL: argumen tak dikenal: '$1' (hanya --project <nama>)" >&2
+      exit 1 ;;
   esac
 done
 
@@ -40,7 +48,15 @@ else
         source "$PROJECTS_DIR"/*.conf
         PROJECT="${PROJECT_NAME:-legacy}"
         export MEMORY_DIR="${MEMORY_DIR:-$ODIN_HOME/memory/$PROJECT}"
+    elif [[ "$CONF_COUNT" -gt 1 ]]; then
+        # >=2 project terdaftar tapi tak ada --project: dulu diam-diam jatuh ke
+        # /var/www/html (project SALAH, memory SALAH). Sekarang gagal keras.
+        echo "FATAL: ada $CONF_COUNT project di $PROJECTS_DIR — wajib pakai --project <nama>." >&2
+        echo "  Projects tersedia:" >&2
+        ls "$PROJECTS_DIR"/*.conf 2>/dev/null | xargs -I{} basename {} .conf | sed 's/^/    /' >&2
+        exit 1
     else
+        # Jalur legacy v1.x murni (belum ada projects/*.conf sama sekali).
         : "${PROJECT_ROOT:=/var/www/html}"
         : "${ALLOWED_LOG_DIRS:=/var/log}"
         : "${MEMORY_DIR:=$ODIN_HOME/memory}"

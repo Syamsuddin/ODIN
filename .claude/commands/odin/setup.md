@@ -1,123 +1,52 @@
-Saat user menjalankan /odin:setup, lakukan rekonfigurasi ODIN secara interaktif.
+Saat user menjalankan /odin:setup, PANDU user memakai CLI `odin` — JANGAN mengedit
+`~/.claude.json` atau `settings.json` secara manual. Sejak v2.0 seluruh konfigurasi
+(server, project, hook guard, allow-list, entry SSH) dihasilkan oleh CLI, dan editan
+tangan akan tertimpa/berkonflik pada `odin project sync` berikutnya.
 
-## Langkah 1 — Baca Config Saat Ini
-
-Baca `~/.claude.json` dan cari `mcpServers.odin`. Jika ada, tampilkan config saat ini:
-
-```
-Config MCP saat ini:
-  SSH host : [args[0]]
-  Run path : [args[1]]
-```
-
-Jika tidak ada, tampilkan:
-
-```
-Config MCP belum ada — akan dibuat baru.
-```
-
-Cari juga settings.json (global `~/.claude/settings.json` atau project `.claude/settings.json`) untuk guard hook saat ini.
-
-## Langkah 2 — Tanyakan Perubahan
-
-Tanyakan ke user (satu per satu, tunggu jawaban tiap pertanyaan):
-
-1. **SSH host/alias** — "SSH host atau alias untuk server (contoh: `vps-app`, `root@192.168.1.100`):"
-   - Tampilkan nilai saat ini sebagai default jika ada
-   - Jika user jawab kosong / enter saja, pakai nilai lama
-
-2. **Path run.sh di server** — "Path run.sh di server (default: `/home/odin/run.sh`):"
-   - Default: `/home/odin/run.sh` atau nilai saat ini
-
-3. **Scope guard** — "Pasang guard hook di mana? (1) Global, (2) Project ini saja:"
-   - Global = `~/.claude/settings.json`
-   - Project = `.claude/settings.json` di working directory saat ini
-
-## Langkah 3 — Tes Koneksi
+## Langkah 1 — Lihat keadaan sekarang
 
 Jalankan:
 
 ```bash
-ssh -o ConnectTimeout=5 -o BatchMode=yes <host> "test -f <run_path> && echo ok"
+odin server list
+odin project list
 ```
 
-- Jika OK: tampilkan `✓ Koneksi SSH OK, run.sh ditemukan`
-- Jika gagal: tampilkan `⚠ Koneksi gagal — config tetap akan ditulis, perbaiki SSH nanti`
-
-Jangan berhenti meskipun gagal.
-
-## Langkah 4 — Tulis Config
-
-**~/.claude.json** — Baca file, update/tambah `mcpServers.odin`:
-
-```json
-{
-  "odin": {
-    "type": "stdio",
-    "command": "ssh",
-    "args": ["<SSH_HOST>", "<RUN_PATH>"]
-  }
-}
-```
-
-Gunakan Python untuk merge JSON (jangan timpa key lain di file):
+Jika perintah `odin` tidak ditemukan, install dulu:
 
 ```bash
-python3 -c "
-import json
-with open('$HOME/.claude.json') as f: data = json.load(f)
-data.setdefault('mcpServers', {})['odin'] = {'type': 'stdio', 'command': 'ssh', 'args': ['<HOST>', '<PATH>']}
-with open('$HOME/.claude.json', 'w') as f: json.dump(data, f, indent=2); f.write('\n')
-print('ok')
-"
+curl -fsSL https://raw.githubusercontent.com/Syamsuddin/ODIN/main/install.sh | bash
 ```
 
-**settings.json** — Tulis ke path sesuai pilihan scope (global atau project). Isi:
+## Langkah 2 — Tentukan yang dibutuhkan user
 
-```json
-{
-  "permissions": {
-    "allow": [
-      "mcp__odin__server_info",
-      "mcp__odin__tail_log",
-      "mcp__odin__http_health_check",
-      "mcp__odin__memory_recall",
-      "mcp__odin__memory_digest",
-      "mcp__odin__session_history",
-      "mcp__odin__rollback_plan",
-      "mcp__odin__inspect_server"
-    ]
-  },
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "mcp__odin__(run_command|service_action|laravel_deploy|run_tests|runbook|inspect_server|memory_write|memory_forget)",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 '<GUARD_PATH>'",
-            "timeout": 10
-          }
-        ]
-      }
-    ]
-  }
-}
+| Kondisi | Perintah |
+|---|---|
+| Belum ada server | `odin server add` (interaktif: host, port, user sudoers, password) |
+| Server ada, project belum | `odin project add` |
+| Ingin non-interaktif | `odin project add --name <nama> --server <alias> --remote-root /var/www/<nama> --workdir <path> --yes` |
+| Config lokal rusak/hilang | `odin project sync --all` |
+| Server perlu update agent | `odin update <alias>` |
+| Ingin MCP tersedia di semua project | `odin global enable` |
+
+`odin server add` melakukan sendiri: membuat user `odin`, memasang sudoers
+(divalidasi `visudo -cf`, dengan rollback bila tidak valid), membuat venv +
+`mcp[cli]`, mengunggah `odin_agent.py`/`run.sh`/`odin-dispatch.sh`, memasang kunci
+SSH ber-forced-command, lalu MEMBUKTIKAN hasilnya dengan handshake MCP
+(`initialize` + `tools/list`). Bila ada langkah yang gagal, config lokal tidak
+ditulis dan penyebabnya dilaporkan.
+
+## Langkah 3 — Verifikasi
+
+```bash
+odin project status
+odin doctor <alias>
 ```
 
-Dimana `<GUARD_PATH>` = `~/.odin/client/odin_guard.py` (atau path relatif dari project).
+`odin doctor` melakukan handshake MCP sungguhan per project — bukan sekadar
+memeriksa keberadaan file.
 
-Jika file settings.json sudah ada, merge permissions.allow (tanpa duplikat) dan hooks.PreToolUse (replace matcher odin). Jangan timpa entry lain.
+## Langkah 4 — Beritahu user
 
-## Langkah 5 — Konfirmasi
-
-Tampilkan:
-
-```
-✓ Config MCP ditulis ke ~/.claude.json
-✓ Guard hook ditulis ke [path settings.json]
-
-Restart sesi Claude Code agar config baru aktif.
-```
-
-Jangan tambahkan penjelasan lain.
+Setelah setup, MCP dimuat saat Claude Code START. Katakan pada user untuk membuka
+sesi baru di workdir project, lalu jalankan `/odin:status`.

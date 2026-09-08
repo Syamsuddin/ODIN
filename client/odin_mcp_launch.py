@@ -7,8 +7,22 @@ dari cwd (cocokkan ke local_workdir di ~/.odin/projects/*.yaml — asumsi yang s
 dipakai odin_cli._detect_current_project), lalu exec SSH stdio MCP ke server yang
 benar dengan --project yang benar.
 
-Satu entry global → melayani SEMUA project terdaftar, resolusi dinamis di waktu-spawn.
-Dir yang bukan project terdaftar → menolak bersih (exit 1), tanpa spawn SSH.
+Satu entry global -> melayani SEMUA project terdaftar, resolusi dinamis di waktu-spawn.
+Dir yang bukan project terdaftar -> menolak bersih (exit 1), tanpa spawn SSH.
+
+ROBUSTNESS (kenapa launcher ini tidak boleh menggantung Claude saat startup MCP):
+  Claude Code mengkoneksikan server MCP HANYA saat startup. Bila launcher MENGGANTUNG
+  (mis. ssh menunggu prompt passphrase/host-key) sampai timeout, tool `mcp__odin__*`
+  diam-diam TIDAK pernah muncul tanpa pesan jelas. Maka:
+    1. Dial server EKSPLISIT dari registry ODIN (~/.odin/servers/<alias>.yaml:
+       host/port/user/key) -> KEBAL terhadap drift/hijack ~/.ssh/config (sama seperti
+       cara CLI `odin` yang dial IP+key langsung). Fallback ke alias bila registry
+       tak lengkap (kompat lama).
+    2. Opsi SSH yang membuat kegagalan CEPAT & KERAS, bukan menggantung: BatchMode
+       (jangan pernah prompt), ConnectTimeout, ServerAlive* (jaga tunnel hidup +
+       deteksi peer mati), StrictHostKeyChecking=accept-new (tak ada prompt host-key).
+    3. Selalu menulis 1 baris diagnosa target ke stderr sebelum exec -> log MCP Claude
+       memperlihatkan PERSIS ke mana ia menyambung (deteksi config/registry drift).
 """
 from __future__ import annotations
 
@@ -16,7 +30,21 @@ import os
 import sys
 from pathlib import Path
 
-PROJECTS_DIR = Path.home() / ".odin" / "projects"
+ODIN_DIR = Path.home() / ".odin"
+PROJECTS_DIR = ODIN_DIR / "projects"
+SERVERS_DIR = ODIN_DIR / "servers"
+
+# Opsi SSH bersama: utamakan GAGAL-CEPAT ketimbang menggantung startup MCP.
+# -T  : tanpa PTY -> cegah MOTD bocor ke stdout (stdout harus bersih utk JSON-RPC).
+#       (-q sengaja TIDAK dipakai: agar error fatal ssh tetap terlihat di log MCP.)
+SSH_COMMON = [
+    "-T",
+    "-o", "BatchMode=yes",                    # JANGAN pernah prompt (passwd/passphrase/host-key) -> fail cepat
+    "-o", "ConnectTimeout=10",                # host mati -> gagal ~10s, bukan menggantung
+    "-o", "ServerAliveInterval=15",           # jaga tunnel MCP hidup selama sesi
+    "-o", "ServerAliveCountMax=4",            # peer mati terdeteksi ~60s lalu keluar
+    "-o", "StrictHostKeyChecking=accept-new",  # terima host baru tanpa prompt; tolak key BERUBAH
+]
 
 try:
     import yaml  # type: ignore
@@ -58,19 +86,65 @@ def _detect(cwd: str) -> dict | None:
     return best
 
 
+def _server_conn(alias: str) -> dict:
+    """Detail koneksi eksplisit dari registry ODIN (~/.odin/servers/<alias>.{yaml,yml,json}).
+    Mengembalikan {} bila tak ditemukan/terbaca -> pemanggil jatuh ke jalur alias."""
+    for ext in (".yaml", ".yml", ".json"):
+        f = SERVERS_DIR / f"{alias}{ext}"
+        if f.is_file():
+            try:
+                return _load(f) or {}
+            except Exception:
+                return {}
+    return {}
+
+
 def main() -> None:
     proj = _detect(os.getcwd())
     if not proj or not proj.get("server") or not proj.get("name"):
         sys.stderr.write(
-            "odin: cwd bukan project ODIN terdaftar — jalankan `odin project add` "
+            "odin-launch: cwd bukan project ODIN terdaftar — jalankan `odin project add` "
             "untuk menautkan workdir ini ke server.\n"
         )
         sys.exit(1)
-    # -q: bungkam banner SSH agar stdio bersih untuk JSON-RPC; -T: tanpa PTY (cegah MOTD)
-    os.execvp(
-        "ssh",
-        ["ssh", "-q", "-T", proj["server"], "/home/odin/run.sh", "--project", proj["name"]],
-    )
+
+    alias = str(proj["server"]).strip()
+    name = str(proj["name"]).strip()
+    remote_cmd = ["/home/odin/run.sh", "--project", name]
+
+    conn = _server_conn(alias)
+    host = str(conn.get("host") or "").strip()
+    user = str(conn.get("user") or "").strip()
+    port = str(conn.get("port") or "").strip()
+    key = str(conn.get("key") or "").strip()
+    key_path = Path(key).expanduser() if key else None
+
+    argv = ["ssh", *SSH_COMMON]
+    if host and user and key_path and key_path.is_file():
+        # Jalur EKSPLISIT (disukai): dial host+key langsung, abaikan ~/.ssh/config.
+        # IdentitiesOnly: jangan coba key lain dari agent (hindari "too many auth failures").
+        argv += ["-o", "IdentitiesOnly=yes", "-i", str(key_path)]
+        if port:
+            argv += ["-p", port]
+        target = f"{user}@{host}"
+        sys.stderr.write(
+            f"odin-launch: {name} -> {target}:{port or '22'} via key registry (kebal ssh_config)\n"
+        )
+    else:
+        # FALLBACK: pakai alias + ~/.ssh/config (kompat lama / registry tak lengkap).
+        target = alias
+        why = "registry tak lengkap" if conn else "registry tak ada"
+        sys.stderr.write(
+            f"odin-launch: {name} -> alias '{alias}' via ~/.ssh/config (fallback: {why})\n"
+        )
+    argv += [target, *remote_cmd]
+    sys.stderr.flush()
+
+    try:
+        os.execvp("ssh", argv)
+    except FileNotFoundError:
+        sys.stderr.write("odin-launch: 'ssh' tidak ditemukan di PATH.\n")
+        sys.exit(127)
 
 
 if __name__ == "__main__":

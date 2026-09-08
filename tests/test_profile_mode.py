@@ -132,12 +132,32 @@ class TestDeriveMode(unittest.TestCase):
              "base": {"uptime_days": 2, "disk_pct": 40}}
         self.assertEqual(da._derive_mode(p), "deploy")
 
-    def test_web_app_production(self):
+    def test_web_app_production_needs_explicit_app_env(self):
+        """production HANYA dari sinyal eksplisit (APP_ENV), bukan dari uptime."""
+        p = {"type": "web-app",
+             "stacks": {"web": {"status": "active"}, "runtime": {"fpm": "php8.3-fpm"}},
+             "app": {"exists": True, "env_exists": True, "vendor_exists": True,
+                     "app_env": "production"},
+             "base": {"uptime_days": 30, "disk_pct": 40}}
+        self.assertEqual(da._derive_mode(p), "production")
+
+    def test_web_app_long_uptime_is_not_production(self):
+        """Regresi T2: VPS staging yang hidup 30 hari TIDAK boleh jadi production —
+        dulu itu memblokir laravel_deploy & apt/npm/pip install di staging."""
+        p = {"type": "web-app",
+             "stacks": {"web": {"status": "active"}, "runtime": {"fpm": "php8.3-fpm"}},
+             "app": {"exists": True, "env_exists": True, "vendor_exists": True,
+                     "app_env": "staging"},
+             "base": {"uptime_days": 30, "disk_pct": 40}}
+        self.assertEqual(da._derive_mode(p), "deploy")
+
+    def test_web_app_production_via_odin_env(self):
         p = {"type": "web-app",
              "stacks": {"web": {"status": "active"}, "runtime": {"fpm": "php8.3-fpm"}},
              "app": {"exists": True, "env_exists": True, "vendor_exists": True},
-             "base": {"uptime_days": 30, "disk_pct": 40}}
-        self.assertEqual(da._derive_mode(p), "production")
+             "base": {"uptime_days": 1, "disk_pct": 40}}
+        with patch.dict(os.environ, {"ODIN_ENV": "production"}):
+            self.assertEqual(da._derive_mode(p), "production")
 
     def test_web_app_high_disk_stays_deploy(self):
         p = {"type": "web-app",
@@ -150,21 +170,25 @@ class TestDeriveMode(unittest.TestCase):
         p = {"type": "database", "stacks": {}, "app": None, "base": {"uptime_days": 0}}
         self.assertEqual(da._derive_mode(p), "setup")
 
-    def test_database_production(self):
+    def test_database_production_needs_signal(self):
         p = {"type": "database",
              "stacks": {"database": {"status": "active"}},
              "app": None, "base": {"uptime_days": 14}}
-        self.assertEqual(da._derive_mode(p), "production")
+        self.assertEqual(da._derive_mode(p), "deploy")
+        with patch.dict(os.environ, {"ODIN_ENV": "production"}):
+            self.assertEqual(da._derive_mode(p), "production")
 
     def test_container_setup(self):
         p = {"type": "container", "stacks": {}, "app": None, "base": {"uptime_days": 0}}
         self.assertEqual(da._derive_mode(p), "setup")
 
-    def test_container_production(self):
+    def test_container_production_needs_signal(self):
         p = {"type": "container",
              "stacks": {"docker": {"status": "active", "running_count": 5}},
              "app": None, "base": {"uptime_days": 10}}
-        self.assertEqual(da._derive_mode(p), "production")
+        self.assertEqual(da._derive_mode(p), "deploy")
+        with patch.dict(os.environ, {"ODIN_ENV": "production"}):
+            self.assertEqual(da._derive_mode(p), "production")
 
     def test_general_always_deploy(self):
         p = {"type": "general", "stacks": {}, "app": None, "base": {"uptime_days": 100}}
