@@ -25,4 +25,7 @@ CLAUDE.md
 # Review & analisis (lokal saja)
 EXECUTIVE_SUMMARY.md
 FULL_REVIEW.md
-docs/
+# docs/ lokal saja (catatan & review), KECUALI sumber buku panduan — PDF-nya
+# di-commit, jadi sumbernya harus ikut supaya bisa dibangun ulang siapa pun.
+docs/*
+!docs/panduan/
