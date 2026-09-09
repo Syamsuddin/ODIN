@@ -58,7 +58,7 @@ Jalan :  python3 odin_agent.py     (dijalankan otomatis oleh Claude Code via MCP
 
 from __future__ import annotations
 
-__version__ = "2.5.0"
+__version__ = "2.5.1"
 
 import atexit
 import fcntl

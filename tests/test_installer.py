@@ -8,6 +8,7 @@ tata letak, migrasi tata letak lama, idempotensi, dan PATH — bukan sekadar
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -86,7 +87,13 @@ class TestInstallSh(unittest.TestCase):
         out = subprocess.run([str(self.home / ".odin" / "bin" / "odin"), "--version"],
                              env=_env(self.home), capture_output=True, text=True)
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertIn("2.3.0", out.stdout + out.stderr)
+        # Versi dibaca dari checkout YANG TERPASANG, bukan dipaku dan bukan dari
+        # working tree: literal hanyut diam-diam tiap rilis (tertinggal di 2.3.0
+        # sampai v2.5.0), sedangkan working tree bisa mendahului git karena
+        # install.sh meng-clone — bukan menyalin — repo ini.
+        installed = (self.home / ".odin" / "app" / "client" / "odin_cli.py").read_text()
+        version = re.search(r'__version__ = "([^"]+)"', installed).group(1)
+        self.assertIn(version, out.stdout + out.stderr)
 
     def test_idempotent_rerun(self):
         r1 = _run_install(self.home)

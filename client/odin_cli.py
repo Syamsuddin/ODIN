@@ -15,7 +15,7 @@ Non-interaktif (batch):
 """
 from __future__ import annotations
 
-__version__ = "2.5.0"
+__version__ = "2.5.1"
 
 import argparse
 import getpass
@@ -1961,7 +1961,16 @@ def cmd_update(alias: str) -> None:
         staged.append(name)
 
     # 3) Compile-check SEBELUM mengganti — file rusak tak boleh pernah aktif.
-    out, errs, rc = ssh.run(
+    #    Cek WAJIB lewat `su - odin`, sama seperti _mcp_handshake. /home/odin
+    #    bermode 700: admin non-root (mis. `syams` dengan sudo) tak bisa membaca
+    #    apa pun di sana, jadi tanpa pp cek ini SELALU "Permission denied" dan
+    #    membatalkan update yang sebenarnya sehat — terlihat sehat hanya karena
+    #    admin biasanya root. Lewat `su` pula supaya py_compile tak meninggalkan
+    #    __pycache__ milik root di rumah user odin.
+    def check(cmd: str):
+        return ssh.run(f"{pp}su - odin -c {shlex.quote(cmd)}")
+
+    out, errs, rc = check(
         f"{ODIN_REMOTE_HOME}/.venv/bin/python -m py_compile {ODIN_REMOTE_HOME}/odin_agent.py.new")
     if rc != 0:
         err(f"odin_agent.py.new GAGAL compile di server — update dibatalkan: "
@@ -1970,7 +1979,7 @@ def cmd_update(alias: str) -> None:
         ssh.close()
         return
     for sh in ("run.sh", "odin-dispatch.sh"):
-        out, errs, rc = ssh.run(f"bash -n {ODIN_REMOTE_HOME}/{sh}.new")
+        out, errs, rc = check(f"bash -n {ODIN_REMOTE_HOME}/{sh}.new")
         if rc != 0:
             err(f"{sh}.new syntax error — update dibatalkan: {(errs or out).strip()[:200]}")
             cleanup(staged)

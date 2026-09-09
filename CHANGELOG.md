@@ -6,6 +6,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ## [Unreleased]
 
+## [2.5.1] - 2026-09-09
+
+Perbaikan satu bug di `odin update` yang membuat perintah itu mustahil dipakai oleh
+siapa pun yang admin-nya BUKAN root.
+
+### Fixed
+
+- **`odin update <alias>` selalu batal dengan admin sudo biasa.** Compile-check dan
+  `bash -n` di langkah 3 `cmd_update()` adalah satu-satunya perintah di seluruh fungsi
+  itu yang dikirim tanpa awalan hak (`pp`) — `mkdir`, `cp`, `mv`, `chown`, `chmod`, dan
+  `grep` semuanya memakainya. `/home/odin` bermode 700 milik user `odin`, jadi admin
+  non-root tak bisa membaca apa pun di sana dan cek berakhir
+  `bash: /home/odin/.venv/bin/python: Permission denied` → update yang sebenarnya sehat
+  dibatalkan, berkas `.new` dibersihkan, server tetap tertinggal versi. Cacatnya
+  tersembunyi karena admin biasanya root, dan root boleh membaca apa saja.
+
+  Kedua cek kini lewat `{pp}su - odin -c …` — pola yang sudah dipakai `_mcp_handshake()`
+  di berkas yang sama, dengan alasan tambahan yang sama: dijalankan sebagai `odin` supaya
+  `py_compile` tidak meninggalkan `__pycache__` milik root di rumah user `odin`.
+
+- **`test_installer.py` memaku versi sebagai literal.** Assertion `"2.3.0"` tertinggal saat
+  rilis v2.5.0 dan baru ketahuan sekarang — persis jenis hanyut versi yang diperingatkan
+  konvensi repo. Kini membaca `odin_cli.__version__`.
+
+### Tests
+
+910 test (dari 907). Empat baru di `test_forced_command.py::TestUpdateChecksRunPrivileged`
+mengunci sifatnya lewat sesi admin non-root palsu: tak satu pun perintah menyentuh
+`/home/odin` tanpa hak, cek dijalankan sebagai `odin` bukan root, dan update benar-benar
+sampai ke penggantian berkas.
+
 ## [2.5.0] - 2026-09-09
 
 Rilis besar dengan tiga bagian. **(1) Keamanan**: menutup tujuh bug dari *Audit Kunci

@@ -497,3 +497,84 @@ class TestProjectModeSeeding:
             assert not (tmp_path / "modes" / "pulih").exists()
             odin_cli.cmd_project_sync("pulih")
             assert (tmp_path / "modes" / "pulih").read_text().strip() == "deploy"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 10. Update: tiap sentuhan ke /home/odin harus membawa hak
+# ═══════════════════════════════════════════════════════════════════════════
+class _RecordingAdmin:
+    """Sesi admin NON-root. /home/odin bermode 700 milik user odin, jadi akses
+    tanpa `sudo`/`su` ditolak persis seperti di server sungguhan."""
+
+    def __init__(self, whoami: str = "syams"):
+        self.cmds: list[str] = []
+        self._whoami = whoami
+
+    @staticmethod
+    def _privileged(cmd: str) -> bool:
+        return cmd.startswith("sudo ") or cmd.startswith("su ")
+
+    def run(self, cmd, timeout=None, stdin_data=None):
+        self.cmds.append(cmd)
+        if cmd == "whoami":
+            return self._whoami, "", 0
+        if "/home/odin" in cmd and not self._privileged(cmd):
+            return "", "bash: line 1: /home/odin/.venv/bin/python: Permission denied", 126
+        return "", "", 0
+
+    def upload(self, src, dst):
+        self.cmds.append(f"UPLOAD {dst}")
+
+    def close(self):
+        pass
+
+    def touches_odin_home_unprivileged(self) -> list[str]:
+        return [c for c in self.cmds
+                if "/home/odin" in c and not self._privileged(c)]
+
+
+def _run_update_as_nonroot_admin(tmp_path):
+    """Jalankan cmd_update dengan admin biasa; kembalikan sesi perekamnya."""
+    sess = _RecordingAdmin()
+    with _server_fixture(tmp_path), patch.object(odin_cli, "paramiko", object()):
+        odin_cli.save_server("srv", {"name": "srv", "host": "1.2.3.4",
+                                     "port": 22, "key": ""})
+        with patch.object(odin_cli, "_admin_session", return_value=sess), \
+             patch.object(odin_cli, "_mcp_handshake", return_value=(True, "23 tools")), \
+             patch.object(odin_cli, "_audit_remote_key", return_value=True), \
+             patch.object(odin_cli, "_audit_remote_sudoers", return_value=[]):
+            odin_cli.cmd_update("srv")
+    return sess
+
+
+class TestUpdateChecksRunPrivileged:
+    """Regresi: compile-check & `bash -n` adalah SATU-SATUNYA perintah di
+    cmd_update yang lupa awalan hak. Dengan admin root itu tak terlihat karena
+    root boleh membaca /home/odin; dengan admin sudo biasa cek SELALU
+    'Permission denied' dan update yang sehat dibatalkan."""
+
+    def test_no_command_touches_odin_home_without_privilege(self, tmp_path):
+        sess = _run_update_as_nonroot_admin(tmp_path)
+        assert sess.touches_odin_home_unprivileged() == []
+
+    def test_update_reaches_atomic_swap(self, tmp_path):
+        """Bukti cek lulus: update sampai ke penggantian berkas, bukan berhenti."""
+        sess = _run_update_as_nonroot_admin(tmp_path)
+        swaps = [c for c in sess.cmds
+                 if f"mv {odin_cli.ODIN_REMOTE_HOME}/odin_agent.py.new "
+                    f"{odin_cli.ODIN_REMOTE_HOME}/odin_agent.py" in c]
+        assert swaps, f"tidak pernah menukar berkas; perintah: {sess.cmds}"
+
+    def test_compile_check_runs_as_odin_not_root(self, tmp_path):
+        """Lewat `su - odin` supaya py_compile tak meninggalkan __pycache__
+        milik root di rumah user odin."""
+        sess = _run_update_as_nonroot_admin(tmp_path)
+        compiles = [c for c in sess.cmds if "py_compile" in c]
+        assert compiles, "compile-check tidak pernah dijalankan"
+        assert all("su - odin -c" in c for c in compiles), compiles
+
+    def test_shell_syntax_checks_are_privileged_too(self, tmp_path):
+        sess = _run_update_as_nonroot_admin(tmp_path)
+        checks = [c for c in sess.cmds if "bash -n" in c]
+        assert len(checks) == 2, checks
+        assert all("su - odin -c" in c for c in checks), checks
