@@ -1,30 +1,183 @@
 #!/usr/bin/env bash
-# ODIN v2.0 — Multi-project MCP launcher
+# ODIN v2.4 — Multi-project MCP launcher + kanal kontrol sempit
 # Usage: run.sh [--project <name>]
+#        run.sh --diagnose
+#        run.sh --provision <name> --root <path>
 #
 # Mode:
 #   --project <name>  →  source projects/<name>.conf, memory di memory/<name>/
 #   (tanpa flag)      →  backward-compatible: single .conf atau env vars lama
+#   --diagnose        →  cetak laporan keadaan server, lalu keluar (TIDAK exec agent)
+#   --provision       →  buat projects/<name>.conf + memory/<name>/, lalu keluar
+#
+# KENAPA ADA --diagnose/--provision (K4):
+#   Kunci SSH ODIN dipasang dengan forced-command (odin-dispatch.sh), jadi sesi
+#   ber-kunci itu TIDAK punya shell: `ssh.run("test -f ...")` tak pernah jalan.
+#   Dulu CLI tetap mengirim perintah shell lewat kunci itu — hasilnya diagnostik
+#   melapor palsu dan `project add` "sukses" tanpa pernah menulis apa pun.
+#   Dua mode di bawah adalah kanal resmi & tervalidasi untuk dua kebutuhan itu,
+#   sehingga alur bebas-password tetap utuh tanpa membuka shell.
 
 ODIN_HOME="$(cd "$(dirname "$0")" && pwd)"
 PROJECTS_DIR="$ODIN_HOME/projects"
+RUN_SH_VERSION="2.4.0"
 
-# --- Parse --project ---
+_fatal() { echo "FATAL: $*" >&2; exit 1; }
+
+_valid_name() {
+    [[ -n "$1" && ! "$1" =~ [^A-Za-z0-9._-] && "$1" != "." && "$1" != ".." ]]
+}
+
+# Path remote: absolut, tanpa '..', tanpa metakarakter. Sama ketatnya dengan
+# _validate_remote_root() di sisi laptop — validasi sisi server tetap wajib
+# karena sisi laptop tidak pernah jadi batas keamanan.
+_valid_root() {
+    [[ "$1" == /* && ! "$1" =~ [^A-Za-z0-9._/-] && "$1" != *".."* ]]
+}
+
+# --- Parse argumen ---
 PROJECT=""
+MODE="serve"
+PROV_NAME=""
+PROV_ROOT=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --project)
-      PROJECT="$2"
-      if [[ -z "$PROJECT" || "$PROJECT" =~ [^A-Za-z0-9._-] ]]; then
-          echo "FATAL: nama project tidak valid: '${PROJECT}'" >&2
-          exit 1
-      fi
+      PROJECT="${2:-}"
+      _valid_name "$PROJECT" || _fatal "nama project tidak valid: '${PROJECT}'"
+      shift 2 ;;
+    --diagnose)
+      MODE="diagnose"
+      shift ;;
+    --provision)
+      MODE="provision"
+      PROV_NAME="${2:-}"
+      _valid_name "$PROV_NAME" || _fatal "nama project tidak valid: '${PROV_NAME}'"
+      shift 2 ;;
+    --root)
+      PROV_ROOT="${2:-}"
+      _valid_root "$PROV_ROOT" || _fatal "path root tidak valid: '${PROV_ROOT}'"
       shift 2 ;;
     *)
-      echo "FATAL: argumen tak dikenal: '$1' (hanya --project <nama>)" >&2
-      exit 1 ;;
+      _fatal "argumen tak dikenal: '$1' (hanya --project/--diagnose/--provision/--root)" ;;
   esac
 done
+
+_machine_id() {
+    cat /etc/machine-id 2>/dev/null || cat /var/lib/dbus/machine-id 2>/dev/null || echo ''
+}
+
+# ── Mode: --diagnose ────────────────────────────────────────────────────────
+# Format baris-per-fakta (bukan JSON) supaya aman diproduksi bash tanpa escaping,
+# dan tetap gampang di-parse. Bagian yang TIDAK terbaca ditandai eksplisit
+# @@UNREADABLE@@ / @@ABSENT@@ — sisi laptop wajib membedakan "aman" dari "buta".
+odin_diagnose() {
+    local venv_py="$ODIN_HOME/.venv/bin/python"
+    local flag
+
+    echo "@@ODIN-DIAGNOSE@@ v=1"
+    printf 'run_sh_version=%s\n' "$RUN_SH_VERSION"
+    printf 'machine_id=%s\n' "$(_machine_id)"
+
+    for spec in "agent_file:-f:$ODIN_HOME/odin_agent.py" \
+                "run_sh_exec:-x:$ODIN_HOME/run.sh" \
+                "dispatch_exec:-x:$ODIN_HOME/odin-dispatch.sh" \
+                "venv_python:-x:$venv_py" \
+                "projects_dir:-d:$PROJECTS_DIR" \
+                "memory_dir:-d:$ODIN_HOME/memory"; do
+        local key="${spec%%:*}"; local rest="${spec#*:}"
+        local test_op="${rest%%:*}"; local target="${rest#*:}"
+        if test "$test_op" "$target"; then flag=1; else flag=0; fi
+        printf '%s=%s\n' "$key" "$flag"
+    done
+
+    printf 'agent_version=%s\n' \
+        "$(grep -m1 '^__version__' "$ODIN_HOME/odin_agent.py" 2>/dev/null | cut -d'"' -f2)"
+
+    if [[ -x "$venv_py" ]] && "$venv_py" -c 'from mcp.server.fastmcp import FastMCP' 2>/dev/null; then
+        echo "mcp_module=1"
+    else
+        echo "mcp_module=0"
+    fi
+
+    printf 'disk=%s\n' "$(df -h / 2>/dev/null | tail -1 | awk '{print $5" "$4}')"
+    printf 'mem=%s\n'  "$(free -h 2>/dev/null | awk '/^Mem/{print $3"/"$2}')"
+
+    local c n m
+    for c in "$PROJECTS_DIR"/*.conf; do
+        [[ -e "$c" ]] || continue
+        n="$(basename "$c" .conf)"
+        if [[ -d "$ODIN_HOME/memory/$n" ]]; then m=1; else m=0; fi
+        printf 'project=%s memory=%s\n' "$n" "$m"
+    done
+
+    # Sudoers: butuh root. Rule NOPASSWD berargumen TERTUTUP `cat /etc/sudoers.d/odin`
+    # (tanpa wildcard → tak bisa dipakai baca file lain) dipasang oleh `server add`.
+    # Server lama tanpa rule itu akan jatuh ke @@UNREADABLE@@ — bukan ke "aman".
+    echo "@@SECTION:sudoers@@"
+    local s_out s_rc
+    s_out="$(sudo -n cat /etc/sudoers.d/odin 2>&1)"; s_rc=$?
+    if [[ $s_rc -eq 0 ]]; then
+        printf '%s\n' "$s_out"
+    elif [[ "$s_out" == *"No such file"* ]]; then
+        echo "@@ABSENT@@"
+    else
+        echo "@@UNREADABLE@@"
+    fi
+
+    echo "@@SECTION:authorized_keys@@"
+    local ak="$HOME/.ssh/authorized_keys"
+    if [[ -r "$ak" ]]; then
+        cat "$ak"
+    elif [[ -e "$ak" ]]; then
+        echo "@@UNREADABLE@@"
+    else
+        echo "@@ABSENT@@"
+    fi
+
+    echo "@@END@@"
+}
+
+# ── Mode: --provision ───────────────────────────────────────────────────────
+# Menulis conf project + memory dir. Sengaja MENOLAK menimpa conf yang sudah ada:
+# menimpa berarti membajak PROJECT_ROOT project lain yang sudah jalan.
+odin_provision() {
+    [[ -n "$PROV_NAME" ]] || _fatal "--provision butuh nama project"
+    [[ -n "$PROV_ROOT" ]] || _fatal "--provision butuh --root <path>"
+
+    mkdir -p "$PROJECTS_DIR" || _fatal "tak bisa membuat $PROJECTS_DIR"
+    chmod 700 "$PROJECTS_DIR" 2>/dev/null
+
+    local conf="$PROJECTS_DIR/$PROV_NAME.conf"
+    [[ -e "$conf" ]] && _fatal "project '$PROV_NAME' sudah ada di server ($conf)"
+
+    umask 077
+    {
+        printf 'PROJECT_NAME=%s\n' "$PROV_NAME"
+        printf 'PROJECT_ROOT=%s\n' "$PROV_ROOT"
+        printf 'ALLOWED_LOG_DIRS=/var/log,%s\n' "$PROV_ROOT"
+    } > "$conf" || _fatal "gagal menulis $conf"
+    chmod 600 "$conf" || _fatal "gagal chmod $conf"
+
+    local mem="$ODIN_HOME/memory/$PROV_NAME"
+    mkdir -p "$mem" || _fatal "gagal membuat $mem"
+    chmod 700 "$mem" || _fatal "gagal chmod $mem"
+
+    echo "@@ODIN-PROVISION@@ ok"
+    printf 'conf=%s\n' "$conf"
+    printf 'memory=%s\n' "$mem"
+    if [[ -d "$PROV_ROOT" ]]; then
+        echo "root_exists=1"
+    else
+        echo "root_exists=0"
+    fi
+    exit 0
+}
+
+case "$MODE" in
+    diagnose)  odin_diagnose; exit 0 ;;
+    provision) odin_provision ;;
+esac
 
 # --- Resolve config ---
 if [[ -n "$PROJECT" ]]; then
@@ -75,7 +228,7 @@ export GLOBAL_MEMORY_DIR="${GLOBAL_MEMORY_DIR:-$ODIN_HOME/memory/_cortex}"
 # Pertama kali (SERVER_ID belum ada di conf) → auto-seed ke conf. Run berikutnya,
 # odin_agent.py membandingkan SERVER_ID vs machine-id aktual & menolak bila beda —
 # sehingga koneksi MCP yang nyasar ke server salah GAGAL LOUD, bukan diam-diam.
-_MACHINE_ID="$(cat /etc/machine-id 2>/dev/null || cat /var/lib/dbus/machine-id 2>/dev/null || echo '')"
+_MACHINE_ID="$(_machine_id)"
 if [[ -n "$_MACHINE_ID" && -z "${SERVER_ID:-}" && -n "${CONF:-}" && -f "${CONF:-}" ]]; then
     printf '\n# auto-seed identitas server (P1)\nSERVER_ID=%s\n' "$_MACHINE_ID" >> "$CONF"
     SERVER_ID="$_MACHINE_ID"

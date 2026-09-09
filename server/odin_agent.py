@@ -58,7 +58,7 @@ Jalan :  python3 odin_agent.py     (dijalankan otomatis oleh Claude Code via MCP
 
 from __future__ import annotations
 
-__version__ = "2.3.0"
+__version__ = "2.5.0"
 
 import atexit
 import fcntl
@@ -967,6 +967,240 @@ def _suggest_rollback(command: str, pre: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# GLADI (rehearse): pratinjau NYATA sebelum perintah destruktif.
+#
+# Kartu risiko hanya memberi LABEL ("TINGGI — undo: git reflog"). Yang benar-benar
+# ingin diketahui operator sebelum menekan "ya" adalah BUKTI: migrasi ini
+# menjalankan SQL apa, reset ini membuang commit mana, apt ini menyentuh paket apa.
+# Rasa takut merusak itulah yang membuat orang akhirnya SSH manual dan melewati
+# ODIN sama sekali.
+#
+# Tiap gladi menjalankan padanan dry-run ASLI dari perintahnya — bukan simulasi
+# ODIN — sehingga yang dilaporkan adalah kebenaran dari tool itu sendiri.
+# SEMUA probe wajib read-only; ia juga tetap melewati _is_dangerous() di _run().
+# `blocking=True` berarti gladi yang GAGAL adalah alasan untuk membatalkan
+# (mis. `nginx -t` merah) — kegagalan ditemukan di latihan, bukan di produksi.
+# ---------------------------------------------------------------------------
+def _q(s: str) -> str:
+    return shlex.quote(s.strip().strip("'\""))
+
+
+def _probe_migrate(m, cmd: str, cwd: str | None) -> list:
+    return [("SQL yang akan dijalankan", "php artisan migrate --pretend", 60)]
+
+
+def _probe_git_ref(m, cmd: str, cwd: str | None) -> list:
+    ref = _q(m.group("ref")) if m.groupdict().get("ref") else "@{u}"
+    return [
+        ("Perubahan lokal yang akan HILANG", "git status --short", 20),
+        (f"Commit yang akan dibuang (ada di HEAD, tidak di {ref})",
+         f"git log --oneline {ref}..HEAD | head -20", 20),
+        (f"Commit yang akan masuk (dari {ref})",
+         f"git log --oneline HEAD..{ref} | head -20", 20),
+        ("Ringkasan file berubah", f"git diff --stat HEAD..{ref} | tail -15", 25),
+    ]
+
+
+def _probe_apt(m, cmd: str, cwd: str | None) -> list:
+    # -s = simulate. Argumen asli dipakai apa adanya supaya hasilnya jujur.
+    sim = re.sub(r"\bapt(?:-get)?\b", "apt-get -s", cmd, count=1)
+    sim = re.sub(r"\bsudo\s+-n\s+|\bsudo\s+", "", sim)
+    return [("Paket yang akan disentuh", f"{sim} 2>&1 | tail -25", 90)]
+
+
+def _probe_service(m, cmd: str, cwd: str | None) -> list:
+    svc = _q(m.group("svc"))
+    raw = m.group("svc").strip("'\"")
+    probes = [("Status sekarang", f"systemctl is-active {svc}; systemctl is-enabled {svc}", 15)]
+    if "nginx" in raw:
+        probes.append(("Uji config nginx (GAGAL = jangan lanjut)", "nginx -t 2>&1", 20))
+    if "php" in raw and "fpm" in raw:
+        probes.append(("Uji config php-fpm", f"{raw} -t 2>&1 || php-fpm -t 2>&1", 20))
+    probes.append(("Koneksi aktif yang akan terputus",
+                   "ss -tn state established 2>/dev/null | tail -n +2 | wc -l", 15))
+    return probes
+
+
+def _probe_rm(m, cmd: str, cwd: str | None) -> list:
+    path = _q(m.group("path"))
+    return [("Ukuran yang akan hilang", f"du -sh {path} 2>/dev/null", 30),
+            ("Isi (maks 30 entri)", f"find {path} -maxdepth 2 2>/dev/null | head -30", 30)]
+
+
+def _probe_composer(m, cmd: str, cwd: str | None) -> list:
+    return [("Paket yang akan berubah", f"{cmd.strip()} --dry-run 2>&1 | tail -25", 120)]
+
+
+def _probe_npm(m, cmd: str, cwd: str | None) -> list:
+    return [("Paket yang akan berubah", f"{cmd.strip()} --dry-run 2>&1 | tail -25", 120)]
+
+
+def _probe_pip(m, cmd: str, cwd: str | None) -> list:
+    return [("Paket yang akan berubah", f"{cmd.strip()} --dry-run 2>&1 | tail -25", 120)]
+
+
+def _probe_certbot(m, cmd: str, cwd: str | None) -> list:
+    return [("Renewal percobaan (tidak menyentuh sertifikat asli)",
+             "certbot renew --dry-run 2>&1 | tail -20", 180)]
+
+
+def _probe_rsync(m, cmd: str, cwd: str | None) -> list:
+    sim = re.sub(r"\brsync\b", "rsync -n", cmd, count=1)
+    return [("File yang akan disalin/dihapus", f"{sim} 2>&1 | tail -30", 120)]
+
+
+# DELETE/UPDATE → SELECT COUNT(*): berapa baris yang sebenarnya kena.
+_SQL_DELETE = re.compile(r"\bDELETE\s+FROM\s+(?P<tbl>[`\"\w.]+)(?P<rest>.*)$",
+                         re.IGNORECASE | re.DOTALL)
+_SQL_UPDATE = re.compile(r"\bUPDATE\s+(?P<tbl>[`\"\w.]+)\s+SET\b.*?(?P<rest>\bWHERE\b.*)?$",
+                         re.IGNORECASE | re.DOTALL)
+
+
+def _sql_to_count(sql: str) -> str | None:
+    md = _SQL_DELETE.search(sql)
+    if md:
+        return f"SELECT COUNT(*) AS baris_terkena FROM {md.group('tbl')}{md.group('rest') or ''}"
+    mu = _SQL_UPDATE.search(sql)
+    if mu:
+        where = (mu.group("rest") or "").strip()
+        return f"SELECT COUNT(*) AS baris_terkena FROM {mu.group('tbl')} {where}".strip()
+    return None
+
+
+def _probe_sql(m, cmd: str, cwd: str | None) -> list:
+    q = re.search(r"-e\s+(['\"])(?P<sql>.*?)\1", cmd, re.DOTALL)
+    if not q:
+        return []
+    counted = _sql_to_count(q.group("sql"))
+    if not counted:
+        return []
+    probe = cmd[:q.start()] + f'-e {shlex.quote(counted)}' + cmd[q.end():]
+    return [("Jumlah baris yang akan terkena", f"{probe} 2>&1 | tail -5", 45)]
+
+
+_REHEARSALS = [
+    {"name": "migrate", "blocking": False,
+     "re": re.compile(r"\bartisan\s+migrate\b(?!:(?:status|rollback|reset))"),
+     "probes": _probe_migrate,
+     "note": "migrate --pretend mencetak SQL tanpa menjalankannya."},
+    {"name": "git-ref", "blocking": False,
+     "re": re.compile(r"\bgit\s+(?:reset\s+--hard|merge|rebase|pull)\s*(?P<ref>[\w./@{}~^-]+)?"),
+     "probes": _probe_git_ref,
+     "note": "Commit yang dibuang masih bisa dipulihkan lewat git reflog."},
+    {"name": "apt", "blocking": False,
+     "re": re.compile(r"\bapt(?:-get)?\s+(?:-\S+\s+)*(?:install|remove|purge|upgrade|dist-upgrade)\b"),
+     "probes": _probe_apt,
+     "note": "apt-get -s hanya mensimulasi; tak ada paket yang berubah."},
+    {"name": "service", "blocking": True,
+     "re": re.compile(r"systemctl\s+(?:restart|stop|reload)\s+(?P<svc>\S+)"),
+     "probes": _probe_service,
+     "note": "Uji config GAGAL = service tak akan naik lagi setelah restart."},
+    {"name": "rm", "blocking": False,
+     "re": re.compile(r"\brm\s+(?:-\S+\s+)*(?P<path>/\S+|[\w./-]+)"),
+     "probes": _probe_rm,
+     "note": "Penghapusan tidak bisa di-undo — pastikan daftar ini benar."},
+    {"name": "composer", "blocking": False,
+     "re": re.compile(r"\bcomposer\s+(?:install|update|require)\b"),
+     "probes": _probe_composer, "note": ""},
+    {"name": "npm", "blocking": False,
+     "re": re.compile(r"\bnpm\s+(?:install|ci)\b"),
+     "probes": _probe_npm, "note": ""},
+    {"name": "pip", "blocking": False,
+     "re": re.compile(r"\bpip3?\s+install\b"),
+     "probes": _probe_pip, "note": ""},
+    {"name": "certbot", "blocking": True,
+     "re": re.compile(r"\bcertbot\s+renew\b(?!.*--dry-run)"),
+     "probes": _probe_certbot, "note": ""},
+    {"name": "rsync", "blocking": False,
+     "re": re.compile(r"\brsync\b(?!.*\s-\w*n)"),
+     "probes": _probe_rsync, "note": "rsync -n = dry-run resmi rsync."},
+    {"name": "sql-write", "blocking": False,
+     "re": re.compile(r"\b(?:mysql|psql|mariadb)\b.*-e\s+['\"].*\b(?:DELETE|UPDATE)\b",
+                      re.IGNORECASE | re.DOTALL),
+     "probes": _probe_sql,
+     "note": "Hitungan diambil dengan WHERE yang sama persis."},
+]
+
+
+def _runbook_rehearsal(name: str, steps: list, cwd: str | None) -> dict:
+    """Gladi seluruh runbook: tiap langkah dipratinjau, TIDAK ada yang dieksekusi."""
+    if not steps:
+        return {"success": False, "error": "steps kosong."}
+    if len(steps) > 20:
+        return {"success": False, "error": "Maks 20 langkah per runbook."}
+    out, blockers = [], []
+    for i, step in enumerate(steps):
+        label = step.get("label") or f"step-{i+1}"
+        cmd = (step.get("command") or "").strip()
+        if not cmd:
+            continue
+        r = _rehearse(cmd, cwd)
+        out.append({"step": i + 1, "label": label, "command": cmd, "rehearsal": r})
+        if r.get("blocking"):
+            blockers.append(label)
+    result = {
+        "success": not blockers, "rehearsal_only": True, "runbook": name,
+        "total_steps": len(steps), "steps": out, "blockers": blockers,
+        "note": "TIDAK ADA langkah yang dieksekusi. Jalankan ulang tanpa rehearse=True "
+                "untuk benar-benar menjalankannya.",
+    }
+    if blockers:
+        result["error"] = (f"Gladi memblokir {len(blockers)} langkah: {', '.join(blockers)}. "
+                           f"Perbaiki dulu sebelum menjalankan runbook.")
+    _audit("runbook", f"GLADI {name} ({len(out)} langkah)", result)
+    return result
+
+
+def _find_rehearsal(command: str):
+    for spec in _REHEARSALS:
+        m = spec["re"].search(command)
+        if m:
+            return spec, m
+    return None, None
+
+
+def _rehearse(command: str, cwd: str | None = None) -> dict:
+    """Jalankan padanan dry-run dari `command`. TIDAK PERNAH menjalankan aslinya."""
+    spec, m = _find_rehearsal(command)
+    if not spec:
+        return {"available": False, "command": command,
+                "reason": "belum ada gladi untuk pola perintah ini"}
+    try:
+        probes = spec["probes"](m, command, cwd)
+    except Exception as e:
+        return {"available": False, "command": command, "reason": f"gagal menyusun gladi: {e}"}
+    if not probes:
+        return {"available": False, "command": command,
+                "reason": "pola cocok tapi tak ada yang bisa dipratinjau"}
+
+    findings, failed = [], []
+    for label, probe_cmd, timeout in probes:
+        r = _run(probe_cmd, cwd, timeout)
+        out = (r.get("stdout") or "").strip()
+        errtxt = (r.get("stderr") or "").strip()
+        entry = {"label": label, "probe": probe_cmd, "ok": bool(r.get("success")),
+                 "output": _truncate(out) if out else "",
+                 "error": _truncate(errtxt)[:400] if (errtxt and not r.get("success")) else ""}
+        findings.append(entry)
+        if not entry["ok"]:
+            failed.append(label)
+
+    blocking = bool(spec["blocking"] and failed)
+    result = {
+        "available": True, "kind": spec["name"], "command": command,
+        "findings": findings, "blocking": blocking,
+        "note": spec.get("note", ""),
+    }
+    if blocking:
+        result["verdict"] = (f"GLADI GAGAL ({', '.join(failed)}) — JANGAN lanjutkan. "
+                             f"Perbaiki dulu penyebabnya.")
+    else:
+        result["verdict"] = ("Gladi selesai. Baca hasilnya sebelum menyetujui perintah asli."
+                             + (f" Catatan: {spec['note']}" if spec.get("note") else ""))
+    return result
+
+
+# ---------------------------------------------------------------------------
 # MEMORY: penyimpanan append-only JSONL + fold (last-write-wins, tombstone)
 # CATATAN: memory selalu di mesin tempat server ini berjalan (proses Python ini),
 # yaitu sisi yang sama dengan mode `local`. Tidak lewat _run, jadi tak terpengaruh
@@ -1333,6 +1567,19 @@ def _cortex_compact(live: dict[str, dict]) -> None:
 
 def _is_cortex_ns(ns: str) -> bool:
     return ns in CORTEX_NAMESPACES
+
+
+def _sibling_projects() -> list[str]:
+    """Nama project lain di server INI (dari projects/*.conf).
+
+    Dipakai untuk memberi tahu penulis siapa saja yang akan melihat entry di
+    namespace cortex. Gagal baca -> daftar kosong, jangan jatuhkan tool."""
+    home = os.path.dirname(os.path.abspath(__file__))
+    pdir = os.path.join(home, "projects")
+    try:
+        return sorted(f[:-5] for f in os.listdir(pdir) if f.endswith(".conf"))
+    except OSError:
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -1861,6 +2108,506 @@ def _build_memory_digest() -> str:
     return f"{body}{trunc_note}{footer}"
 
 
+# ---------------------------------------------------------------------------
+# SERAH-TERIMA (handover): "apa yang terjadi sejak saya terakhir di sini?"
+#
+# Digest memory menyuntikkan FAKTA STATIS (versi PHP, nama service). Yang hilang
+# adalah DELTA. Operator membuka sesi Senin pagi dan harus bertanya sendiri: ada
+# deploy Jumat malam? nginx pernah restart? disk naik? error yang sama muncul lagi?
+# Di ops fisik ini namanya shift handover.
+#
+# Semua bahan bakunya sudah ada — audit.jsonl (ber-ts), events.jsonl cortex,
+# fingerprint deploy, metrics-history, error-freq. Yang kurang hanya WATERMARK:
+# satu file kecil berisi kapan sesi terakhir dimulai.
+# ---------------------------------------------------------------------------
+WATERMARK_FILE = os.path.join(MEMORY_DIR, "last_seen")
+
+
+def _read_watermark() -> str:
+    try:
+        with open(WATERMARK_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except (OSError, ValueError):
+        return ""
+
+
+def _write_watermark(ts: str = "") -> None:
+    try:
+        os.makedirs(MEMORY_DIR, mode=0o700, exist_ok=True)
+        with open(WATERMARK_FILE, "w", encoding="utf-8") as f:
+            f.write(ts or _now_iso())
+        os.chmod(WATERMARK_FILE, 0o600)
+    except OSError:
+        log.debug("gagal tulis watermark", exc_info=True)
+
+
+def _humanize_gap(since_iso: str) -> str:
+    try:
+        then = datetime.fromisoformat(since_iso.replace("Z", "+00:00"))
+        if then.tzinfo is None:
+            then = then.replace(tzinfo=timezone.utc)
+        delta = datetime.now(timezone.utc) - then
+    except (ValueError, TypeError):
+        return "?"
+    total = int(delta.total_seconds())
+    if total < 3600:
+        return f"{max(1, total // 60)} menit"
+    if total < 86400:
+        return f"{total // 3600} jam"
+    return f"{total // 86400} hari {(total % 86400) // 3600} jam"
+
+
+def _audit_since(since_iso: str, limit: int = 400) -> list[dict]:
+    """Baca audit.jsonl sejak `since_iso`. Kosong bila file tak ada."""
+    if not os.path.exists(AUDIT_FILE):
+        return []
+    rows: list[dict] = []
+    try:
+        with open(AUDIT_FILE, "r", encoding="utf-8") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    rec = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if since_iso and rec.get("ts", "") < since_iso:
+                    continue
+                rows.append(rec)
+    except OSError:
+        return []
+    return rows[-limit:]
+
+
+def _build_handover(since_iso: str = "", deep: bool = False) -> dict:
+    """Ringkas apa yang berubah sejak `since_iso`.
+
+    deep=False (dipakai saat STARTUP): hanya membaca file — audit, event, memory.
+    Nol subprocess, jadi handshake MCP tak pernah tertahan. Ini penting: startup
+    punya anggaran ~30 detik dari Claude Code, dan inspeksi penuh sudah pernah
+    membuat server gagal connect karena dijalankan di waktu import.
+
+    deep=True (dipakai tool handover()): tambah deteksi drift, yang menjalankan
+    4 subprocess git/php — layak saat diminta, terlarang saat startup."""
+    since_iso = since_iso or _read_watermark()
+    report: dict = {"since": since_iso, "gap": _humanize_gap(since_iso) if since_iso else "",
+                    "first_session": not since_iso, "lines": []}
+    if not since_iso:
+        report["lines"].append("Sesi pertama untuk project ini — belum ada riwayat.")
+        return report
+
+    lines: list[str] = []
+    rows = _audit_since(since_iso)
+
+    # 1) Deploy — peristiwa paling berdampak.
+    deploys = [r for r in rows if r.get("tool") == "laravel_deploy"]
+    for d in deploys[-3:]:
+        status = "sukses" if d.get("success") else "GAGAL"
+        lines.append(f"Deploy {status} — {d.get('ts', '?')[:16].replace('T', ' ')} "
+                     f"({d.get('summary', '')[:70]})")
+    if len(deploys) > 3:
+        lines.append(f"(+{len(deploys) - 3} deploy lain)")
+
+    # 2) Service yang di-restart/stop — sumber downtime paling umum.
+    svc = [r for r in rows if r.get("tool") == "service_action"
+           and not r.get("summary", "").startswith("status")]
+    if svc:
+        lines.append(f"{len(svc)}× aksi service: "
+                     + ", ".join(sorted({s.get('summary', '?')[:40] for s in svc})[:4]))
+
+    # 3) Kegagalan perintah — apa yang macet sejak terakhir.
+    failed = [r for r in rows if r.get("tool") == "run_command" and not r.get("success")]
+    if failed:
+        lines.append(f"{len(failed)} perintah gagal — terakhir: "
+                     f"{failed[-1].get('summary', '?')[:70]}")
+
+    # 4) Tetangga di server yang sama (nginx/mysql dipakai bersama).
+    try:
+        gap_h = max(1, min(24 * 14, int(
+            (datetime.now(timezone.utc)
+             - datetime.fromisoformat(since_iso.replace("Z", "+00:00"))
+             .replace(tzinfo=timezone.utc)).total_seconds() // 3600) + 1))
+        events = _events_read(hours=gap_h, exclude_project=PROJECT_NAME)
+        notable = [e for e in events if e.get("severity") in ("warn", "error")]
+        for e in notable[-3:]:
+            lines.append(f"[{e.get('project', '?')}] {e.get('event', '')}: "
+                         f"{e.get('detail', '')[:60]}")
+    except Exception:
+        log.debug("handover: baca events gagal", exc_info=True)
+
+    # 5) Tren disk/memory dari ring-buffer metrics.
+    try:
+        fold = _mem_fold()
+        rec = fold.get("server:metrics-history")
+        if rec:
+            hist = json.loads(rec.get("text", "[]"))
+            if len(hist) >= 2:
+                first, last = hist[0], hist[-1]
+                for key, label in (("disk_pct", "Disk"), ("memory_pct", "Memory")):
+                    diff = last.get(key, 0) - first.get(key, 0)
+                    if abs(diff) >= 5:
+                        arrow = "naik" if diff > 0 else "turun"
+                        lines.append(f"{label} {first.get(key)}% → {last.get(key)}% "
+                                     f"({arrow} {abs(diff)} poin)")
+    except Exception:
+        log.debug("handover: baca metrics gagal", exc_info=True)
+
+    # 6) Drift — bukti ada yang menyentuh server di luar ODIN. Hanya saat deep:
+    #    _detect_drift menjalankan 4 subprocess, terlalu mahal untuk waktu import.
+    try:
+        if deep and PROJECT_ROOT and os.path.isdir(PROJECT_ROOT):
+            drift = _detect_drift(PROJECT_ROOT)
+            if drift.get("has_drift"):
+                for c in (drift.get("changes") or [])[:3]:
+                    lines.append(f"DRIFT: {c}")
+    except Exception:
+        log.debug("handover: drift gagal", exc_info=True)
+
+    # 7) Error yang paling sering berulang.
+    try:
+        top = sorted(_error_counts.items(), key=lambda kv: kv[1], reverse=True)[:2]
+        for etype, n in top:
+            if n >= 3:
+                lines.append(f"Error berulang: '{etype}' ({n}×)")
+    except Exception:
+        pass
+
+    report["lines"] = lines
+    report["counts"] = {"deploys": len(deploys), "service_actions": len(svc),
+                        "failed_commands": len(failed), "audit_rows": len(rows)}
+    return report
+
+
+def _handover_text(report: dict) -> str:
+    """Render serah-terima untuk instructions startup. Kosong = tak ada yang perlu."""
+    if report.get("first_session") or not report.get("lines"):
+        return ""
+    head = (f"\n\n## SERAH-TERIMA {PROJECT_NAME or 'project'} "
+            f"(sejak {report['since'][:16].replace('T', ' ')}, {report['gap']} lalu)\n")
+    body = "\n".join(f"• {l}" for l in report["lines"][:12])
+    tail = ("\nPakai handover() untuk detail atau rentang lain. "
+            "Sampaikan ringkasan ini di awal sesi bila relevan.\n")
+    return head + body + tail
+
+
+# ---------------------------------------------------------------------------
+# TRIASE: gejala → sapuan bukti read-only → hipotesis terurut → satu tindakan.
+#
+# Bahannya sudah ada semua (tail_log, service status, health, pola error, cortex),
+# tapi tak ada yang MERANGKAI. Di tengah insiden, mengorkestrasi 20 tool satu per
+# satu itu lambat dan tak konsisten. Peta di bawah membekukan urutan pemeriksaan
+# yang biasa dilakukan sysadmin berpengalaman.
+#
+# Hipotesis diperingkat dengan menghitung berapa `signals` yang muncul di seluruh
+# keluaran bukti — sederhana, dapat dijelaskan, tanpa ML. `weight` membedakan
+# sinyal yang menentukan (socket hilang) dari yang sekadar mendukung.
+# ---------------------------------------------------------------------------
+_TRIAGE_GENERIC = {
+    "name": "umum",
+    "probes": [
+        ("Service inti", "systemctl is-active nginx mysql mariadb 2>/dev/null | tr '\\n' ' '", 15),
+        ("Disk", "df -h / | tail -1", 10),
+        ("Memory & load", "free -h | head -2; uptime", 10),
+        ("Service gagal", "systemctl --failed --no-pager --no-legend 2>/dev/null | head -10", 20),
+        ("Error sistem terbaru",
+         "journalctl --no-pager -p err -n 15 2>/dev/null | tail -15", 25),
+    ],
+    "hypotheses": [],
+}
+
+_TRIAGE_MAP = [
+    {
+        "name": "gateway-error",
+        "match": ("502", "504", "bad gateway", "gateway", "gagal akses", "situs mati",
+                  "site down", "tidak bisa diakses"),
+        "probes": [
+            ("nginx status", "systemctl is-active nginx", 10),
+            ("nginx error log",
+             "tail -30 /var/log/nginx/error.log 2>/dev/null", 15),
+            ("php-fpm status",
+             "systemctl list-units --type=service --state=active 2>/dev/null "
+             "| grep -i 'php.*fpm' || echo 'php-fpm TIDAK aktif'", 15),
+            ("socket php-fpm",
+             "ls -l /run/php/*.sock /var/run/php/*.sock 2>/dev/null || echo 'socket TIDAK ADA'", 10),
+            ("OOM 2 jam terakhir",
+             "journalctl --no-pager --since '2 hours ago' 2>/dev/null "
+             "| grep -iE 'out of memory|oom' | tail -5 || echo '-'", 25),
+            ("Disk", "df -h / | tail -1", 10),
+        ],
+        "hypotheses": [
+            {"title": "php-fpm mati atau socket-nya hilang",
+             "signals": [("socket tidak ada", 3), ("php-fpm tidak aktif", 3),
+                         ("connect() failed", 2), ("no such file or directory", 2),
+                         ("upstream", 1)],
+             "action": "systemctl restart php8.3-fpm  (sesuaikan versi PHP)"},
+            {"title": "php-fpm di-OOM-kill (memory habis)",
+             "signals": [("oom-kill", 3), ("out of memory", 3), ("killed process", 2)],
+             "action": "free -h && systemctl restart php8.3-fpm  — lalu naikkan memory/pm.max_children"},
+            {"title": "Upstream timeout — aplikasi lambat, bukan mati",
+             "signals": [("upstream timed out", 3), ("timeout", 1), ("504", 1)],
+             "action": "tail_log slow log + cek query lambat; naikkan fastcgi_read_timeout bila perlu"},
+            {"title": "Disk penuh membuat socket/log gagal ditulis",
+             "signals": [("100%", 3), ("no space left", 3), ("99%", 2), ("98%", 1)],
+             "action": "df -h && du -sh /var/log/* | sort -h | tail -10"},
+            {"title": "Config nginx rusak setelah perubahan",
+             "signals": [("emerg", 3), ("invalid", 2), ("unexpected", 1)],
+             "action": "nginx -t  (lihat pesan persisnya sebelum reload)"},
+        ],
+    },
+    {
+        "name": "disk-penuh",
+        "match": ("disk", "penuh", "no space", "full", "storage", "kehabisan ruang"),
+        "probes": [
+            ("Pemakaian disk", "df -h", 10),
+            ("Inode", "df -i / | tail -1", 10),
+            ("Direktori terbesar di /var",
+             "du -sh /var/* 2>/dev/null | sort -h | tail -8", 45),
+            ("Log terbesar",
+             "find /var/log -type f -size +50M 2>/dev/null | head -10 || echo '-'", 30),
+            ("File terhapus tapi masih dipegang proses",
+             "lsof +L1 2>/dev/null | head -8 || echo '-'", 25),
+        ],
+        "hypotheses": [
+            {"title": "Log membengkak (paling sering)",
+             "signals": [("/var/log", 3), (".log", 2), ("journal", 2)],
+             "action": "journalctl --vacuum-size=200M && truncate -s 0 <log-terbesar>"},
+            {"title": "Inode habis walau byte masih ada",
+             "signals": [("100% /", 2), ("ifree", 1)],
+             "action": "df -i && find / -xdev -type f | wc -l  — cari direktori berisi jutaan file kecil"},
+            {"title": "File terhapus masih dipegang proses (ruang tak kembali)",
+             "signals": [("deleted", 3), ("lsof", 1)],
+             "action": "restart service pemegang file (lihat kolom PID dari lsof +L1)"},
+        ],
+    },
+    {
+        "name": "database-down",
+        "match": ("database", "db", "mysql", "mariadb", "postgres", "sqlstate",
+                  "connection refused", "tidak bisa connect"),
+        "probes": [
+            ("Status DB",
+             "systemctl is-active mysql mariadb postgresql 2>/dev/null | tr '\\n' ' '", 15),
+            ("Port DB",
+             "ss -tlnp 2>/dev/null | grep -E ':3306|:5432' || echo 'port DB TIDAK listen'", 15),
+            ("Error log DB",
+             "tail -25 /var/log/mysql/error.log 2>/dev/null "
+             "|| journalctl -u mysql --no-pager -n 20 2>/dev/null || echo '-'", 25),
+            ("Koneksi DB aktif (level socket, tanpa kredensial)",
+             "ss -tn state established 2>/dev/null "
+             "| grep -cE ':3306|:5432' || echo 0", 15),
+            ("Disk (DB berhenti bila penuh)", "df -h / | tail -1", 10),
+        ],
+        "hypotheses": [
+            {"title": "Service DB mati",
+             "signals": [("inactive", 3), ("failed", 3), ("port db tidak listen", 3),
+                         ("can't connect", 2)],
+             "action": "systemctl restart mysql  — baca error log dulu bila ia gagal naik"},
+            {"title": "max_connections tercapai",
+             "signals": [("too many connections", 3), ("max_connections", 3),
+                         ("1040", 2)],
+             "action": "SHOW PROCESSLIST — bunuh koneksi nganggur, lalu naikkan max_connections"},
+            {"title": "DB berhenti karena disk penuh",
+             "signals": [("no space", 3), ("100%", 2), ("disk full", 3)],
+             "action": "bersihkan disk dulu, baru systemctl restart mysql"},
+            {"title": "Kredensial/host salah di .env aplikasi",
+             "signals": [("access denied", 3), ("1045", 2), ("authentication", 2)],
+             "action": "cek DB_USERNAME/DB_PASSWORD di .env vs user MySQL sebenarnya"},
+            {"title": "Tabel korup setelah mati mendadak",
+             "signals": [("crashed", 3), ("corrupt", 3), ("repair", 2)],
+             "action": "mysqlcheck --repair --all-databases  (backup dulu!)"},
+        ],
+    },
+    {
+        "name": "lambat",
+        "match": ("lambat", "slow", "berat", "lemot", "latency", "timeout", "hang"),
+        "probes": [
+            ("Load & uptime", "uptime", 10),
+            ("Memory", "free -h | head -2", 10),
+            ("Proses CPU teratas",
+             "ps aux --sort=-%cpu 2>/dev/null | head -6", 20),
+            ("Proses memory teratas",
+             "ps aux --sort=-%mem 2>/dev/null | head -6", 20),
+            ("I/O wait", "vmstat 1 2 2>/dev/null | tail -1 || echo '-'", 15),
+            ("Koneksi DB aktif (level socket)",
+             "ss -tn state established 2>/dev/null "
+             "| grep -cE ':3306|:5432' || echo 0", 15),
+        ],
+        "hypotheses": [
+            {"title": "Memory habis → swap thrashing",
+             "signals": [("swap", 2), ("0b free", 2), ("oom", 3)],
+             "action": "free -h && ps aux --sort=-%mem | head — matikan/limit proses paling rakus"},
+            {"title": "Satu proses memakan CPU",
+             "signals": [("100.0", 2), ("99.", 1), ("cpu", 1)],
+             "action": "ps aux --sort=-%cpu | head — periksa proses teratas sebelum mematikannya"},
+            {"title": "Query DB lambat menahan request",
+             "signals": [("query", 2), ("locked", 3), ("sending data", 2)],
+             "action": "SHOW FULL PROCESSLIST — cari query berdurasi panjang & indeks yang hilang"},
+            {"title": "I/O wait tinggi (disk lambat/penuh)",
+             "signals": [("wa", 1), ("iowait", 3)],
+             "action": "iostat -x 1 3  — cek utilisasi disk"},
+        ],
+    },
+    {
+        "name": "ssl",
+        "match": ("ssl", "sertifikat", "certificate", "https", "cert", "expired",
+                  "kadaluarsa", "kedaluwarsa"),
+        "probes": [
+            ("Sertifikat terpasang",
+             "certbot certificates 2>/dev/null | head -25 || echo 'certbot tak ada'", 45),
+            ("Timer auto-renew",
+             "systemctl is-active certbot.timer snap.certbot.renew.timer 2>/dev/null "
+             "| tr '\\n' ' '", 15),
+            ("Log renewal terakhir",
+             "tail -15 /var/log/letsencrypt/letsencrypt.log 2>/dev/null || echo '-'", 20),
+            ("nginx config test", "nginx -t 2>&1", 20),
+        ],
+        "hypotheses": [
+            {"title": "Sertifikat kedaluwarsa / hampir habis",
+             "signals": [("expired", 3), ("invalid_days", 2), ("vald days: 0", 3)],
+             "action": "certbot renew --dry-run  dulu, baru certbot renew"},
+            {"title": "Auto-renew mati sehingga tak pernah diperpanjang",
+             "signals": [("inactive", 3), ("dead", 2)],
+             "action": "systemctl enable --now certbot.timer"},
+            {"title": "Renewal gagal karena challenge HTTP terblokir",
+             "signals": [("challenge", 3), ("timeout", 2), ("connection refused", 2),
+                         ("unauthorized", 3)],
+             "action": "pastikan port 80 terbuka & .well-known dapat diakses dari luar"},
+        ],
+    },
+    {
+        "name": "deploy-gagal",
+        "match": ("deploy", "rilis", "release", "gagal deploy", "composer", "migrasi",
+                  "migration"),
+        "probes": [
+            ("Git state", "git status --short 2>/dev/null | head -10 || echo '-'", 20),
+            ("Log aplikasi",
+             "tail -30 storage/logs/laravel.log 2>/dev/null || echo '-'", 20),
+            ("Permission storage",
+             "ls -ld storage storage/logs bootstrap/cache 2>/dev/null || echo '-'", 15),
+            ("Disk", "df -h / | tail -1", 10),
+            ("Versi PHP & composer",
+             "php -v 2>/dev/null | head -1; composer --version 2>/dev/null", 25),
+        ],
+        "hypotheses": [
+            {"title": "Permission storage/cache salah setelah deploy",
+             "signals": [("permission denied", 3), ("failed to open stream", 3),
+                         ("not writable", 3)],
+             "action": "chown -R www-data:www-data storage bootstrap/cache"},
+            {"title": "Migrasi gagal di tengah — skema setengah jadi",
+             "signals": [("sqlstate", 3), ("migration", 2), ("already exists", 2)],
+             "action": "rehearse('php artisan migrate') dulu, lalu migrate:rollback --step=1"},
+            {"title": "Dependensi composer tak cocok",
+             "signals": [("composer", 2), ("class not found", 3), ("autoload", 2)],
+             "action": "composer install --no-dev --optimize-autoloader"},
+            {"title": "Disk penuh menggagalkan penulisan",
+             "signals": [("no space", 3), ("100%", 2)],
+             "action": "bersihkan disk lalu ulangi deploy"},
+        ],
+    },
+    {
+        "name": "service-mati",
+        "match": ("service", "systemctl", "mati", "failed", "tidak jalan", "down",
+                  "nginx mati"),
+        "probes": [
+            ("Service gagal",
+             "systemctl --failed --no-pager --no-legend 2>/dev/null | head -10 || echo '-'", 20),
+            ("Service inti",
+             "systemctl is-active nginx mysql mariadb 2>/dev/null | tr '\\n' ' '", 15),
+            ("Error journal",
+             "journalctl --no-pager -p err -n 20 2>/dev/null | tail -20", 25),
+            ("Boot terakhir", "uptime -s 2>/dev/null; uptime", 10),
+        ],
+        "hypotheses": [
+            {"title": "Service gagal start karena config rusak",
+             "signals": [("failed", 3), ("emerg", 3), ("invalid", 2),
+                         ("configuration", 2)],
+             "action": "journalctl -u <service> -n 50 --no-pager  — baca alasan persisnya"},
+            {"title": "Server baru saja reboot, service tak enabled",
+             "signals": [("up 0 min", 3), ("up 1 min", 2), ("inactive", 1)],
+             "action": "systemctl enable --now <service>"},
+            {"title": "Port sudah dipakai proses lain",
+             "signals": [("address already in use", 3), ("bind", 2)],
+             "action": "ss -tlnp | grep :80  — matikan proses yang menempati port"},
+        ],
+    },
+    {
+        "name": "memory",
+        "match": ("memory", "ram", "oom", "out of memory", "swap", "kehabisan memori"),
+        "probes": [
+            ("Memory", "free -h", 10),
+            ("Proses memory teratas", "ps aux --sort=-%mem 2>/dev/null | head -8", 20),
+            ("Jejak OOM 24 jam",
+             "journalctl --no-pager --since '24 hours ago' 2>/dev/null "
+             "| grep -iE 'out of memory|oom' | tail -10 || echo '-'", 30),
+            ("Swap", "swapon --show 2>/dev/null || echo 'TIDAK ADA swap'", 10),
+        ],
+        "hypotheses": [
+            {"title": "OOM killer sudah mematikan proses",
+             "signals": [("oom-kill", 3), ("killed process", 3), ("out of memory", 3)],
+             "action": "identifikasi proses korban di journal, lalu batasi pm.max_children / tambah swap"},
+            {"title": "Tidak ada swap — lonjakan kecil langsung fatal",
+             "signals": [("tidak ada swap", 3)],
+             "action": "fallocate -l 2G /swapfile && mkswap && swapon  (lalu daftarkan di /etc/fstab)"},
+            {"title": "Satu proses bocor memory",
+             "signals": [("%mem", 1), ("php-fpm", 1), ("mysqld", 1)],
+             "action": "ps aux --sort=-%mem | head — restart proses paling rakus & pantau ulang"},
+        ],
+    },
+]
+
+
+def _match_symptom(symptom: str) -> dict:
+    """Pilih peta gejala terdekat. Tak ada yang cocok → sapuan umum."""
+    low = symptom.lower()
+    best, best_score = None, 0
+    for spec in _TRIAGE_MAP:
+        score = sum(len(kw) for kw in spec["match"] if kw in low)
+        if score > best_score:
+            best, best_score = spec, score
+    return best or _TRIAGE_GENERIC
+
+
+def _rank_hypotheses(spec: dict, blob: str, evidence: list) -> list[dict]:
+    """Peringkat hipotesis dari jumlah & bobot sinyal yang muncul di bukti."""
+    ranked = []
+    for h in spec.get("hypotheses", []):
+        hits = [(sig, w) for sig, w in h["signals"] if sig in blob]
+        if not hits:
+            continue
+        score = sum(w for _, w in hits)
+        strength = "kuat" if score >= 5 else ("sedang" if score >= 3 else "lemah")
+        ranked.append({"title": h["title"], "strength": strength, "score": score,
+                       "evidence_matched": [sig for sig, _ in hits],
+                       "action": h["action"]})
+    ranked.sort(key=lambda x: x["score"], reverse=True)
+    if not ranked:
+        ranked.append({
+            "title": "Tak ada pola dikenali — perlu pemeriksaan manual",
+            "strength": "tidak diketahui", "score": 0, "evidence_matched": [],
+            "action": "Baca bagian `evidence` di atas; bila perlu tail_log pada log spesifik.",
+        })
+    return ranked[:5]
+
+
+def _record_incident(symptom: str, kind: str, hypotheses: list, action: str) -> None:
+    """Catat timeline insiden ke memory — post-mortem yang menulis dirinya sendiri."""
+    try:
+        top = hypotheses[0] if hypotheses else {}
+        stamp = _now_iso()
+        key = f"incident-{stamp[:16].replace(':', '').replace('-', '').replace('T', '-')}"
+        text = (f"TRIASE [{kind}] gejala: {symptom[:120]} | "
+                f"hipotesis utama: {top.get('title', '?')} ({top.get('strength', '?')}) | "
+                f"tindakan disarankan: {action[:120]}")
+        _mem_append({"id": f"server:{key}", "ns": "server", "key": key, "text": text,
+                     "tags": ["incident", "triage", "auto"], "source": "triage",
+                     "created_at": stamp, "updated_at": stamp,
+                     "expires_at": None, "pinned": False, "deleted": False})
+        _event_append(PROJECT_NAME, "triage", f"{kind}: {top.get('title', symptom)[:70]}",
+                      "warn")
+    except Exception:
+        log.debug("gagal mencatat insiden", exc_info=True)
+
+
 def _validate_ns(ns: str) -> str | None:
     if ns not in MEMORY_NAMESPACES:
         return f"ns '{ns}' tidak dikenal. Pilih: {list(MEMORY_NAMESPACES)}"
@@ -2363,8 +3110,17 @@ def _mode_gate(tool_name: str, command: str = "") -> dict | None:
 
 
 def _build_instructions() -> str:
-    """Gabungkan memory digest + info profile/mode untuk FastMCP instructions."""
+    """Gabungkan memory digest + serah-terima + info profile/mode untuk instructions."""
     digest = _build_memory_digest()
+    # Serah-terima dihitung SEBELUM watermark digeser, lalu watermark dipindah ke
+    # sekarang supaya sesi berikutnya melapor delta sejak sesi INI dimulai.
+    handover_txt = ""
+    try:
+        handover_txt = _handover_text(_build_handover())
+    except Exception:
+        log.debug("gagal menyusun serah-terima", exc_info=True)
+    finally:
+        _write_watermark()
     mode_info = (f"\n\n## MODE OPERASI: {_CURRENT_MODE.upper()}\n"
                  f"Tipe server: {_PROFILE.get('type', 'unknown')}\n")
     if _CURRENT_MODE == "production":
@@ -2384,7 +3140,7 @@ def _build_instructions() -> str:
                     f"document root nginx ke sini. Lihat memory 'server:web-root' untuk detail.\n")
     else:
         mode_info += "Mode DEPLOY — operasi standar, WRITE perlu konfirmasi user.\n"
-    return digest + mode_info
+    return digest + handover_txt + mode_info
 
 
 _STARTUP_CACHE_MAX_AGE = 3600  # detik — pakai cache profile jika inspeksi < 1 jam lalu
@@ -2796,7 +3552,7 @@ def _detect_drift(app_path: str) -> dict:
     return drift
 
 
-def _preflight_deploy(app_path: str) -> tuple[dict, list[str]]:
+def _preflight_deploy(app_path: str, with_migrate: bool = False) -> tuple[dict, list[str]]:
     """Cek prasyarat sebelum deploy. Return (checks, blockers).
     Jika blockers tidak kosong, deploy dibatalkan dengan laporan."""
     checks: dict = {}
@@ -2831,6 +3587,16 @@ def _preflight_deploy(app_path: str) -> tuple[dict, list[str]]:
             checks["drift"] = drift
     except Exception:
         log.debug("drift detection gagal", exc_info=True)
+    # Gladi migrasi: SQL yang akan dijalankan terlihat SEBELUM deploy dimulai,
+    # bukan sesudah. Migrasi adalah langkah paling sulit di-undo di seluruh
+    # deploy, jadi ia yang paling pantas dipratinjau.
+    if with_migrate:
+        try:
+            reh = _rehearse("php artisan migrate --force", app_path)
+            if reh.get("available"):
+                checks["migration_preview"] = reh
+        except Exception:
+            log.debug("gladi migrasi gagal", exc_info=True)
     return checks, blockers
 
 
@@ -2865,7 +3631,7 @@ def laravel_deploy(app_path: str, branch: str = "main", composer: bool = True,
         return {"success": False, "failed_steps": ["validation"],
                 "app_path": app_path, "branch": branch, "steps": [],
                 "error": "Nama branch tidak valid (hanya alfanumerik, titik, garis miring, strip)."}
-    preflight, blockers = _preflight_deploy(app_path)
+    preflight, blockers = _preflight_deploy(app_path, with_migrate=migrate)
     if blockers:
         return {"success": False, "failed_steps": ["preflight"],
                 "app_path": app_path, "branch": branch, "steps": [],
@@ -3080,7 +3846,8 @@ def inspect_server() -> dict:
 
 
 @mcp.tool()
-def runbook(name: str, steps: list[dict], app_path: str = "") -> dict:
+def runbook(name: str, steps: list[dict], app_path: str = "",
+            rehearse: bool = False) -> dict:
     """Jalankan serangkaian langkah berurutan (runbook workflow). Berhenti pada langkah pertama
     yang gagal kecuali langkah tersebut punya continue_on_fail=True. Setiap langkah dicatat
     lengkap dengan analisis error dan saran rollback.
@@ -3097,7 +3864,12 @@ def runbook(name: str, steps: list[dict], app_path: str = "") -> dict:
             - timeout (int, opsional): batas detik, default 180.
             - continue_on_fail (bool, opsional): True = lanjut meskipun langkah ini gagal.
         app_path: working directory untuk semua langkah. Kosong = home default.
+        rehearse: True = GLADI SAJA. Tiap langkah hanya dipratinjau (dry-run),
+            TIDAK ada yang dieksekusi. Pakai ini untuk melihat dampak seluruh
+            runbook sebelum menjalankannya sungguhan.
     """
+    if rehearse:
+        return _runbook_rehearsal(name, steps, app_path or None)
     block = _mode_gate("runbook")
     if block:
         return block
@@ -3161,6 +3933,145 @@ def runbook(name: str, steps: list[dict], app_path: str = "") -> dict:
     sev = "error" if failed else "info"
     _event_append(PROJECT_NAME, "runbook", f"{name} ({executed}/{total}) failed={failed}", sev)
     _orchestrate("runbook", {"name": name, "steps": steps}, out)
+    return out
+
+
+@mcp.tool()
+def triage(symptom: str) -> dict:
+    """TRIASE: satu perintah saat sesuatu mati. Sapuan bukti read-only + hipotesis terurut.
+
+    Saat situs 502 jam 2 pagi, operator tidak ingin memilih dari 20 tool — ia ingin
+    menyebut GEJALA dan mendapat hipotesis terurut plus satu tindakan berikutnya.
+
+    Menjalankan sapuan bukti read-only (semua auto-allow, biasanya < 15 detik),
+    mengorelasikannya, lalu memeringkat hipotesis berdasarkan jumlah bukti yang cocok.
+    Timeline insiden dicatat otomatis ke memory sebagai bahan post-mortem.
+
+    Gejala yang dikenal: 502/504/bad gateway, disk penuh, database/mysql down,
+    lambat/slow, ssl/sertifikat, deploy gagal, service mati, memory/OOM.
+    Gejala bebas juga diterima — akan dipetakan ke yang terdekat, atau memakai
+    sapuan umum bila tak ada yang cocok.
+
+    Args:
+        symptom: gejala apa adanya dari user, mis. "502", "situs lambat sejak deploy",
+            "mysql tidak bisa connect".
+    """
+    symptom = (symptom or "").strip()
+    if not symptom:
+        return {"success": False, "error": "symptom kosong — sebutkan gejalanya."}
+
+    spec = _match_symptom(symptom)
+    # Probe seperti `tail storage/logs/laravel.log` memakai path relatif, jadi
+    # sapuan dijalankan dari root project — bukan dari home.
+    probe_cwd = _resolve_default_cwd("")
+    evidence: list[dict] = []
+    for label, cmd, timeout in spec["probes"]:
+        r = _run(cmd, probe_cwd, timeout)
+        out = (r.get("stdout") or "").strip()
+        evidence.append({"label": label, "probe": cmd, "ok": bool(r.get("success")),
+                         "output": _truncate(out)[:1200] if out else "",
+                         "error": _truncate((r.get("stderr") or ""))[:300]
+                         if not r.get("success") else ""})
+
+    blob = "\n".join(f"{e['label']}\n{e['output']}\n{e['error']}" for e in evidence).lower()
+    hypotheses = _rank_hypotheses(spec, blob, evidence)
+
+    # Konteks: deploy & aksi service terakhir sering jadi penyebab langsung.
+    context: list[str] = []
+    try:
+        recent = _audit_since("")[-40:]
+        for r in reversed(recent):
+            if r.get("tool") in ("laravel_deploy", "service_action", "runbook") \
+                    and len(context) < 3:
+                context.append(f"{r.get('ts', '?')[:16].replace('T', ' ')} "
+                               f"{r.get('tool')}: {r.get('summary', '')[:60]} "
+                               f"({'ok' if r.get('success') else 'GAGAL'})")
+    except Exception:
+        pass
+    try:
+        for e in _events_read(hours=6, exclude_project=PROJECT_NAME)[-3:]:
+            context.append(f"[{e.get('project', '?')}] {e.get('event', '')}: "
+                           f"{e.get('detail', '')[:50]}")
+    except Exception:
+        pass
+
+    next_action = hypotheses[0]["action"] if hypotheses else ""
+    out = {
+        "success": True, "symptom": symptom, "matched": spec["name"],
+        "evidence": evidence, "hypotheses": hypotheses, "context": context,
+        "next_action": next_action,
+        "note": ("Semua langkah di atas read-only. `next_action` BELUM dijalankan — "
+                 "sampaikan ke user dan minta persetujuan dulu."),
+    }
+    _record_incident(symptom, spec["name"], hypotheses, next_action)
+    _audit("triage", f"{spec['name']} :: {symptom[:60]}", out)
+    _session_log("triage", f"triase: {symptom[:50]}", out)
+    return out
+
+
+@mcp.tool()
+def handover(since: str = "", full: bool = False) -> dict:
+    """SERAH-TERIMA: apa yang berubah di server ini sejak sesi terakhir. Read-only.
+
+    Ringkasan versi singkat sudah otomatis disuntikkan ke konteks tiap sesi baru.
+    Panggil tool ini bila user bertanya "ada apa selama saya pergi?", atau untuk
+    melihat rentang waktu lain.
+
+    Menghimpun dari sumber yang sudah ada: audit log (deploy, aksi service,
+    perintah gagal), event lintas-project di server yang sama, tren disk/memory,
+    drift fingerprint deploy, dan frekuensi error berulang.
+
+    Args:
+        since: batas awal ISO, mis. "2026-09-01T00:00:00". Kosong = sejak sesi
+            terakhir (watermark otomatis).
+        full: True = sertakan baris audit mentah untuk forensik lebih dalam.
+    """
+    try:
+        report = _build_handover(since, deep=True)
+    except Exception as e:
+        return {"success": False, "error": f"gagal menyusun serah-terima: {e}"}
+    out = {"success": True, **report}
+    if full:
+        out["audit_rows"] = _audit_since(report.get("since", ""), limit=100)
+    _audit("handover", f"sejak {report.get('since', '-')[:16]}", out)
+    return out
+
+
+@mcp.tool()
+def rehearse(command: str, cwd: str = "") -> dict:
+    """GLADI: tampilkan dampak NYATA sebuah perintah destruktif tanpa menjalankannya.
+
+    Jalankan ini SEBELUM meminta persetujuan user untuk perintah WRITE yang berisiko.
+    Kartu risiko hanya memberi label ("TINGGI"); tool ini memberi BUKTI — SQL yang akan
+    dieksekusi, commit yang akan dibuang, paket yang akan disentuh, baris DB yang kena.
+
+    Yang dijalankan adalah padanan dry-run RESMI dari tool bersangkutan (bukan simulasi
+    ODIN), jadi hasilnya adalah kebenaran dari tool itu sendiri:
+      artisan migrate   → migrate --pretend (SQL lengkap)
+      git reset --hard  → commit yang hilang/masuk + perubahan lokal yang akan terbuang
+      apt install       → apt-get -s (simulasi paket)
+      systemctl restart → nginx -t / php-fpm -t + jumlah koneksi yang akan terputus
+      rm -rf            → ukuran & isi direktori
+      composer/npm/pip  → --dry-run
+      certbot renew     → --dry-run
+      rsync             → rsync -n
+      DELETE/UPDATE SQL → SELECT COUNT(*) dengan WHERE yang sama persis
+
+    Jika hasilnya `blocking: true`, gladi menemukan alasan untuk MEMBATALKAN
+    (mis. `nginx -t` gagal) — sampaikan itu ke user, jangan lanjutkan.
+
+    Args:
+        command: perintah yang HENDAK dijalankan (bukan perintah dry-run-nya).
+        cwd: working directory, mis. path aplikasi untuk perintah git/artisan.
+    """
+    command = (command or "").strip()
+    if not command:
+        return {"success": False, "error": "command kosong."}
+    real_cwd = _resolve_default_cwd(cwd)
+    r = _rehearse(command, real_cwd)
+    out = {"success": True, **r}
+    _audit("rehearse", f"{r.get('kind', 'n/a')} :: {command[:80]}", out)
+    _session_log("rehearse", f"gladi: {command[:60]}", out)
     return out
 
 
@@ -3334,6 +4245,19 @@ def memory_write(ns: str, text: str, key: str = "", tags: list[str] | None = Non
         return {"success": False, "error": f"gagal tulis memory: {e}"}
     scope = "cortex (global)" if cortex else f"project ({PROJECT_NAME or 'local'})"
     result: dict = {"success": True, "id": rid, "scope": scope, "entry": record}
+    # Namespace cortex dibagi SEMUA project di server ini. Label `scope` saja
+    # mudah terlewat, jadi sebutkan konsekuensinya secara eksplisit — penulis
+    # harus tahu entry ini terbaca dari project lain sebelum menaruh sesuatu
+    # yang project-spesifik di sana.
+    if cortex:
+        others = [p for p in _sibling_projects() if p != PROJECT_NAME]
+        seen_by = (f"Terlihat oleh {len(others)} project lain di server ini "
+                   f"({', '.join(others[:5])}{'…' if len(others) > 5 else ''}).") \
+            if others else "Saat ini belum ada project lain di server ini."
+        result["_shared"] = True
+        result["_shared_warning"] = (
+            f"Namespace '{ns}' BERSAMA lintas-project. {seen_by} "
+            f"Untuk fakta khusus project ini, pakai ns='server' atau 'instruction'.")
     if similar:
         result["_similar_existing"] = similar
         result["_hint"] = ("Ada entry mirip di namespace yang sama. "

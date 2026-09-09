@@ -411,3 +411,70 @@ class TestResourceRouting(CortexBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ===========================================================================
+# Namespace bersama harus MENYEBUT konsekuensinya
+#
+# `scope: cortex (global)` saja mudah terlewat. Penulis perlu tahu entry ini
+# terbaca dari project lain di server yang sama SEBELUM menaruh sesuatu yang
+# sebenarnya project-spesifik di sana.
+# ===========================================================================
+class TestSharedNamespaceWarning(CortexBase):
+
+    def _siblings(self, *names):
+        """Palsukan daftar project tetangga (isi projects/*.conf di server)."""
+        return patch.object(da, "_sibling_projects", lambda: sorted(names))
+
+    def test_cortex_write_is_flagged_shared(self):
+        r = self._write("profile", "Syams admin", key="owner")
+        self.assertTrue(r["success"])
+        self.assertTrue(r.get("_shared"))
+        self.assertIn("BERSAMA", r["_shared_warning"])
+
+    def test_warning_names_the_project_scoped_alternative(self):
+        r = self._write("cross", "nginx dipakai bersama", key="nginx")
+        self.assertIn("ns='server'", r["_shared_warning"])
+
+    def test_project_namespaces_are_not_flagged(self):
+        """server/instruction terisolasi per project — jangan beri peringatan palsu."""
+        for ns in ("server", "instruction"):
+            r = self._write(ns, f"fakta {ns}", key=f"k-{ns}")
+            self.assertTrue(r["success"])
+            self.assertNotIn("_shared", r)
+            self.assertNotIn("_shared_warning", r)
+
+    def test_warning_lists_sibling_projects(self):
+        with self._siblings("simuru", "gibtha", "epondok"):
+            r = self._write("profile", "Syams admin", key="owner2")
+        w = r["_shared_warning"]
+        self.assertIn("gibtha", w)
+        self.assertIn("epondok", w)
+        self.assertNotIn("simuru,", w)          # diri sendiri tidak dihitung
+        self.assertIn("2 project lain", w)
+
+    def test_warning_is_honest_when_alone(self):
+        with self._siblings("simuru"):
+            r = self._write("profile", "Syams admin", key="owner3")
+        self.assertIn("belum ada project lain", r["_shared_warning"])
+
+    def test_sibling_lookup_survives_missing_dir(self):
+        """projects/ tak terbaca -> daftar kosong, tool TIDAK boleh gagal."""
+        with patch.object(da.os, "listdir", side_effect=OSError("no such dir")):
+            self.assertEqual(da._sibling_projects(), [])
+            r = self._write("profile", "tanpa projects dir", key="owner4")
+        self.assertTrue(r["success"])
+        self.assertTrue(r.get("_shared"))
+
+    def test_sibling_lookup_reads_conf_names(self):
+        """Fungsi asli: baca projects/*.conf di sebelah odin_agent.py."""
+        pdir = os.path.join(self.tmpdir, "projects")
+        os.makedirs(pdir, exist_ok=True)
+        for n in ("beta", "alpha"):
+            with open(os.path.join(pdir, f"{n}.conf"), "w") as f:
+                f.write(f"PROJECT_NAME={n}\n")
+        with open(os.path.join(pdir, "bukan.txt"), "w") as f:
+            f.write("abaikan\n")
+        with patch.object(da.os.path, "abspath",
+                          return_value=os.path.join(self.tmpdir, "odin_agent.py")):
+            self.assertEqual(da._sibling_projects(), ["alpha", "beta"])

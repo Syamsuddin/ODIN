@@ -715,3 +715,85 @@ import unittest.mock
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ===========================================================================
+# Celah klasifikasi READ yang ditemukan saat membangun Gladi & Triase (v2.5).
+# Semuanya perintah yang BENAR-BENAR read-only tapi dulu meminta konfirmasi —
+# gesekan yang justru muncul saat operator sedang mendiagnosis masalah.
+# ===========================================================================
+class TestReadOnlyGapsV25(unittest.TestCase):
+
+    def test_pipe_inside_quotes_is_not_a_shell_pipe(self):
+        """`grep -E 'a|b'` dulu dipecah jadi 2 segmen; segmen kedua tak dikenali."""
+        self.assertEqual(guard.classify_command("grep -E 'error|warn' /var/log/x"), "allow")
+        self.assertEqual(guard.classify_command('grep -E "a|b" f'), "allow")
+        self.assertEqual(len(guard._split_segments("grep -E 'a|b' f")), 1)
+
+    def test_real_pipe_still_splits(self):
+        segs = guard._split_segments("cat f | grep x")
+        self.assertEqual(len(segs), 2)
+
+    def test_write_after_quoted_pipe_still_asks(self):
+        """Masking kutip tak boleh menyembunyikan perintah tulis sesudahnya."""
+        self.assertEqual(guard.classify_command("grep -E 'a|b' f | rm -rf /tmp/x"), "ask")
+
+    def test_artisan_pretend_is_read(self):
+        self.assertEqual(guard.classify_command("php artisan migrate --pretend"), "allow")
+        self.assertEqual(guard.classify_command("php artisan migrate --force"), "ask")
+
+    def test_dry_run_flag_makes_package_managers_read(self):
+        for cmd in ("composer install --dry-run", "npm ci --dry-run",
+                    "pip install x --dry-run", "certbot renew --dry-run"):
+            self.assertEqual(guard.classify_command(cmd), "allow", cmd)
+
+    def test_without_dry_run_they_still_ask(self):
+        for cmd in ("composer install", "npm ci", "pip install x", "certbot renew"):
+            self.assertEqual(guard.classify_command(cmd), "ask", cmd)
+
+    def test_apt_simulate_is_read(self):
+        self.assertEqual(guard.classify_command("apt-get -s install nginx"), "allow")
+        self.assertEqual(guard.classify_command("apt-get install nginx"), "ask")
+
+    def test_apt_read_subcommand_tolerates_leading_flags(self):
+        self.assertEqual(guard.classify_command("apt-get -q show nginx"), "allow")
+
+    def test_git_global_flags_before_subcommand(self):
+        self.assertEqual(guard.classify_command("git -C /srv/app status"), "allow")
+        self.assertEqual(guard.classify_command("git -c core.pager=cat log -1"), "allow")
+        self.assertEqual(guard.classify_command("git -C /srv/app push"), "ask")
+
+    def test_systemctl_listing_flags_are_read(self):
+        self.assertEqual(
+            guard.classify_command("systemctl --failed --no-pager --no-legend"), "allow")
+        self.assertEqual(guard.classify_command("systemctl --type=service --state=running"),
+                         "allow")
+
+    def test_systemctl_write_subcommand_still_asks(self):
+        self.assertEqual(guard.classify_command("systemctl restart nginx"), "ask")
+        self.assertEqual(guard.classify_command("systemctl --now enable nginx"), "ask")
+
+    def test_swapon_show_is_read_but_activation_asks(self):
+        self.assertEqual(guard.classify_command("swapon --show"), "allow")
+        self.assertEqual(guard.classify_command("swapon /dev/sda2"), "ask")
+
+    def test_sql_less_than_is_not_input_redirect(self):
+        """`WHERE a < 10` di dalam -e "..." bukan redirect — pasangan dari
+        perbaikan `>` yang sudah ada lebih dulu."""
+        self.assertEqual(
+            guard.classify_command('mysql db -e "SELECT * FROM t WHERE a < 10"'), "allow")
+        self.assertEqual(
+            guard.classify_command('mysql db -e "SELECT COUNT(*) FROM o WHERE t < 10"'),
+            "allow")
+
+    def test_real_input_redirect_still_asks(self):
+        self.assertEqual(guard.classify_command("mysql db < dump.sql"), "ask")
+        self.assertEqual(guard.classify_command('mysql db <<< "SELECT 1"'), "ask")
+
+    def test_sql_write_still_asks_even_with_operators(self):
+        self.assertEqual(
+            guard.classify_command('mysql db -e "DELETE FROM t WHERE a < 10"'), "ask")
+
+    def test_mysqladmin_remains_write_by_design(self):
+        """Keputusan lama yang disengaja — jangan dilonggarkan demi kenyamanan."""
+        self.assertFalse(guard.seg_is_read("mysqladmin status"))

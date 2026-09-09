@@ -364,9 +364,21 @@ class TestRemoteHardeningAudit(unittest.TestCase):
         ssh = FakeSSH({"cat /etc/sudoers.d/odin": (odin_cli.SUDOERS_ODIN, 0)})
         self.assertEqual(odin_cli._audit_remote_sudoers(ssh), [])
 
-    def test_missing_file_is_not_a_finding(self):
-        ssh = FakeSSH({"cat /etc/sudoers.d/odin": ("", 1)})
+    def test_absent_file_is_not_a_finding(self):
+        """File tak ada = odin tanpa hak sudo = tak ada yang rentan."""
+        ssh = FakeSSH({"/etc/sudoers.d/odin": ("@@ABSENT@@\n", 0)})
         self.assertEqual(odin_cli._audit_remote_sudoers(ssh), [])
+
+    def test_unreadable_is_unknown_not_safe(self):
+        """Gagal-terbuka pada audit keamanan lebih berbahaya daripada FAIL palsu:
+        dulu `cat` yang gagal mengembalikan [] dan doctor mencetak OK justru
+        ketika ia buta. Sekarang ketidaktahuan punya nilainya sendiri."""
+        ssh = FakeSSH({"/etc/sudoers.d/odin": ("", 1)})
+        self.assertIsNone(odin_cli._audit_remote_sudoers(ssh))
+
+    def test_unreadable_key_is_unknown_not_safe(self):
+        ssh = FakeSSH({"authorized_keys": ("", 1)})
+        self.assertIsNone(odin_cli._audit_remote_key(ssh))
 
     def test_key_without_forced_command_detected(self):
         ssh = FakeSSH({"authorized_keys": ("ssh-ed25519 AAAAC3 odin-vps\n", 0)})

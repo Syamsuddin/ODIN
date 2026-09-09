@@ -239,3 +239,74 @@ class TestWarnProjectMismatch:
             result = odin_guard._warn_project_mismatch("ghost")
             assert "ghost" in result
             assert "tidak terdaftar" in result
+
+
+class TestModeDoesNotLeakAcrossProjects:
+    """`~/.odin_mode` adalah file BERSAMA warisan v1.
+
+    Dulu ia dibaca juga saat project TERDETEKSI tapi file modenya belum ada,
+    sehingga satu sesi tanpa identitas project yang menulis `production` ke sana
+    membuat setiap project yang belum pernah menjalankan inspect_server ikut
+    dianggap production. Mode project yang belum diketahui adalah `deploy`."""
+
+    def _workdir(self, tmp_path, project):
+        wd = tmp_path / project.upper()
+        (wd / ".claude").mkdir(parents=True)
+        settings = {"mcpServers": {"odin": {"args": ["srv", "-T", "--project", project]}}}
+        (wd / ".claude" / "settings.json").write_text(json.dumps(settings))
+        return wd
+
+    def _env(self, tmp_path, wd):
+        return (patch.dict(os.environ, {"CLAUDE_WORKING_DIRECTORY": str(wd)}, clear=False),
+                patch("os.path.expanduser",
+                      side_effect=lambda p: str(tmp_path / p.lstrip("~/"))))
+
+    def test_legacy_file_ignored_when_project_detected(self, tmp_path):
+        (tmp_path / ".odin_mode").write_text("production\n")
+        (tmp_path / ".odin" / "modes").mkdir(parents=True)
+        wd = self._workdir(tmp_path, "beta")          # beta TANPA file mode sendiri
+
+        e1, e2 = self._env(tmp_path, wd)
+        with e1, e2, patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ODIN_MODE", None)
+            assert odin_guard._get_mode() == "deploy"
+
+    def test_own_mode_file_still_wins(self, tmp_path):
+        (tmp_path / ".odin_mode").write_text("deploy\n")
+        modes = tmp_path / ".odin" / "modes"
+        modes.mkdir(parents=True)
+        (modes / "alpha").write_text("production\n")
+        wd = self._workdir(tmp_path, "alpha")
+
+        e1, e2 = self._env(tmp_path, wd)
+        with e1, e2:
+            assert odin_guard._get_mode() == "production"
+
+    def test_legacy_file_still_used_without_project(self, tmp_path):
+        """Kompatibilitas v1.x: sesi tanpa project tetap membaca file bersama."""
+        (tmp_path / ".odin_mode").write_text("production\n")
+        wd = tmp_path / "BUKAN_PROJECT"
+        wd.mkdir()
+
+        e1, e2 = self._env(tmp_path, wd)
+        with e1, e2:
+            assert odin_guard._get_mode() == "production"
+
+    def test_one_project_sync_does_not_move_another(self, tmp_path):
+        """PostToolUse menulis mode HANYA ke papan project yang bersangkutan."""
+        (tmp_path / ".odin" / "modes").mkdir(parents=True)
+        wd_a = self._workdir(tmp_path, "alpha")
+        wd_b = self._workdir(tmp_path, "beta")
+
+        e1, e2 = self._env(tmp_path, wd_a)
+        with e1, e2:
+            odin_guard._sync_mode_from_result(
+                {"tool_name": "mcp__odin__inspect_server",
+                 "tool_result": {"mode": "production"}})
+
+        e1, e2 = self._env(tmp_path, wd_b)
+        with e1, e2:
+            os.environ.pop("ODIN_MODE", None)
+            assert odin_guard._get_mode() == "deploy"      # beta tak ikut bergeser
+        assert (tmp_path / ".odin" / "modes" / "alpha").read_text().strip() == "production"
+        assert not (tmp_path / ".odin" / "modes" / "beta").exists()

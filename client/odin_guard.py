@@ -20,7 +20,7 @@ Pada error apa pun -> exit 0 tanpa output (jangan memblokir karena bug guard).
 import json
 import os
 
-__version__ = "2.3.0"
+__version__ = "2.5.0"
 import re
 import subprocess
 import sys
@@ -98,6 +98,16 @@ COMPOSER_READ = {"show", "--version", "-V", "diagnose", "validate", "licenses",
                  "outdated", "status", "about", "depends", "prohibits", "why"}
 SYSTEMCTL_READ = {"status", "is-active", "is-enabled", "is-failed", "list-units",
                   "list-unit-files", "show", "cat", "get-default"}
+# Flag yang hanya MENAMPILKAN — `systemctl --failed` tak mengubah apa pun.
+SYSTEMCTL_READ_FLAGS = {"--failed", "--all", "--no-pager", "--no-legend", "--type",
+                        "--state", "--version", "--full", "-a", "-l", "--plain",
+                        "--quiet", "--user", "--system"}
+# Utilitas diagnostik read-only yang dulu tak dikenal sehingga meminta konfirmasi
+# padahal tak menyentuh apa pun.
+SWAPON_READ = {"--show", "-s", "--summary", "--help", "--version"}
+# Tool yang punya --dry-run resmi & benar-benar tidak menulis apa pun saat dipakai.
+DRY_RUN_AWARE = {"composer", "npm", "yarn", "pnpm", "pip", "pip3", "rsync",
+                 "certbot", "apt", "apt-get"}
 DOCKER_READ = {"ps", "images", "logs", "inspect", "version", "info", "stats",
                "top", "port", "diff", "history"}
 # Klien DB read-only -> SELECT/SHOW/DESCRIBE/EXPLAIN aman dibaca.
@@ -154,7 +164,10 @@ def _db_seg_is_read(cmd: str, seg: str) -> bool:
     """True hanya bila segmen klien DB ini JELAS read-only (boleh auto-jalan)."""
     if cmd in ("mysqldump", "mysqladmin"):
         return False                       # backup/admin → tetap konfirmasi
-    if re.search(r"<\s*\S", seg):          # input dari file/heredoc → isi tak diketahui
+    # Cek redirect input pada seg yang SUDAH dikosongkan kutipnya — `WHERE a < 10`
+    # di dalam -e "..." bukan redirect. Ini pasangan dari _strip_quotes yang sudah
+    # dipakai untuk `>`; tanpa itu SELECT ber-`<` diminta konfirmasi padahal read.
+    if re.search(r"<\s*\S", _strip_quotes(seg)):   # input dari file/heredoc
         return False
     if _SQL_WRITE.search(seg):
         return False
@@ -220,14 +233,39 @@ def seg_is_read(seg: str) -> bool:
     args = toks[i + 1:]
     if cmd in ("sudo", "su", "doas"):
         return False
+    # Flag dry-run resmi milik package manager: perintahnya hanya MELAPOR apa yang
+    # akan terjadi. Ini dasar fitur gladi (rehearse) — tanpa aturan ini, pratinjau
+    # yang justru dibuat agar aman malah meminta konfirmasi.
+    if cmd in DRY_RUN_AWARE and any(a in ("--dry-run", "--dryrun") for a in args):
+        return True
     if cmd == "git":
-        return bool(args) and args[0] in GIT_READ
+        # Lewati flag global git (-C <path>, -c k=v, --no-pager) sebelum sub-perintah.
+        j = 0
+        while j < len(args):
+            if args[j] in ("-C", "-c", "--git-dir", "--work-tree"):
+                j += 2
+            elif args[j].startswith("-"):
+                j += 1
+            else:
+                break
+        return j < len(args) and args[j] in GIT_READ
     if cmd == "php":
-        return bool(args) and args[0] in PHP_READ
+        if args and args[0] in PHP_READ:
+            return True
+        # `artisan migrate --pretend` HANYA mencetak SQL — itu justru dasar dari
+        # fitur gladi (rehearse). Sama untuk --dry-run pada sub-perintah artisan.
+        if args and args[0] == "artisan":
+            return any(a in ("--pretend", "--dry-run") for a in args)
+        return False
     if cmd == "composer":
         return bool(args) and args[0] in COMPOSER_READ
     if cmd == "systemctl":
-        return bool(args) and args[0] in SYSTEMCTL_READ
+        sub = [a for a in args if not a.startswith("-")]
+        if sub:
+            return sub[0] in SYSTEMCTL_READ
+        # Tanpa sub-perintah = listing (mis. `systemctl --failed`) — read, asalkan
+        # flagnya memang flag baca.
+        return all(a.split("=")[0] in SYSTEMCTL_READ_FLAGS for a in args)
     if cmd == "docker":
         return bool(args) and args[0] in DOCKER_READ
     if cmd == "sed":
@@ -237,10 +275,17 @@ def seg_is_read(seg: str) -> bool:
         return not any(FIND_WRITE.match(a) for a in args)
     if cmd in ("awk", "gawk", "mawk"):  # awk bisa menulis lewat system()/redirect
         return not re.search(r"system\s*\(|print(f)?\s*>|>>", seg)
+    if cmd == "swapon":
+        return bool(args) and all(a in SWAPON_READ for a in args)
     if cmd in DB_CLIENTS:
         return _db_seg_is_read(cmd, seg)
     if cmd in ("apt", "apt-get", "apt-cache"):
-        return bool(args) and args[0] in APT_READ
+        # -s/--simulate/--dry-run hanya MENSIMULASI — ini dasar fitur gladi.
+        if any(a in ("-s", "--simulate", "--dry-run", "--just-print", "--no-act")
+               for a in args):
+            return True
+        sub = [a for a in args if not a.startswith("-")]
+        return bool(sub) and sub[0] in APT_READ
     if cmd == "dpkg":
         return bool(args) and args[0] in DPKG_READ
     if cmd in ("pip", "pip3"):
@@ -275,6 +320,32 @@ def seg_is_read(seg: str) -> bool:
     return cmd in READ_CMDS
 
 
+_QUOTED = re.compile(r"\$'[^']*'|'[^']*'|\"[^\"]*\"")
+
+
+def _split_segments(c: str) -> list:
+    """Pecah perintah pada operator shell — TAPI abaikan operator di dalam kutip.
+
+    Tanpa ini `grep -E \'error|warn\' file` dipecah jadi dua segmen dan segmen
+    kedua (`warn\' file`) bukan perintah yang dikenal, sehingga perintah read
+    paling lumrah pun meminta konfirmasi. Isi kutip dimasker dulu, dipecah, lalu
+    dikembalikan utuh supaya seg_is_read tetap melihat perintah aslinya."""
+    holds: list = []
+
+    def hold(m):
+        holds.append(m.group(0))
+        return f"\x00{len(holds) - 1}\x00"
+
+    masked = _QUOTED.sub(hold, c)
+    parts = re.split(r"\|\||&&|[|;&\n]", masked)
+    out = []
+    for part in parts:
+        for i, original in enumerate(holds):
+            part = part.replace(f"\x00{i}\x00", original)
+        out.append(part)
+    return out
+
+
 def classify_command(command: str) -> str:
     """Kembalikan keputusan izin: 'allow' (read) | 'ask' (write/danger)."""
     if not command.strip():
@@ -293,8 +364,7 @@ def classify_command(command: str) -> str:
     c_noq = _strip_quotes(c)
     if re.search(r"(^|[^0-9&])>>?\s*\S", c_noq) or re.search(r"\btee\b", c_noq):
         return "ask"
-    segments = re.split(r"\|\||&&|[|;&\n]", c)
-    return "allow" if all(seg_is_read(s) for s in segments) else "ask"
+    return "allow" if all(seg_is_read(s) for s in _split_segments(c)) else "ask"
 
 
 # ===========================================================================
@@ -569,30 +639,73 @@ READ_ONLY_TOOLS = (
     "runbook_templates", "cortex_events", "server_info", "tail_log",
     "http_health_check", "memory_recall", "memory_digest", "memory_health",
     "session_history",
+    # v2.5 — semuanya read-only:
+    #   rehearse  menjalankan padanan dry-run, tak pernah perintah aslinya
+    #   handover  membaca audit/event/memory yang sudah ada
+    #   triage    sapuan bukti saat insiden (status, log, metrik)
+    "rehearse", "handover", "triage",
 )
+
+# Perintah yang punya GLADI di sisi server (sinkron dengan _REHEARSALS di
+# odin_agent.py). Guard tidak bisa menjalankan gladi sendiri — ia hook di laptop —
+# tapi ia bisa MEMBERI TAHU bahwa bukti nyata tersedia sebelum user menyetujui.
+_REHEARSABLE = [
+    (re.compile(r"\bartisan\s+migrate\b(?!:(?:status|rollback|reset))"),
+     "SQL lengkap lewat migrate --pretend"),
+    (re.compile(r"\bgit\s+(?:reset\s+--hard|merge|rebase|pull)\b"),
+     "commit yang hilang/masuk + perubahan lokal yang terbuang"),
+    (re.compile(r"\bapt(?:-get)?\s+(?:-\S+\s+)*(?:install|remove|purge|upgrade|dist-upgrade)\b"),
+     "daftar paket lewat apt-get -s"),
+    (re.compile(r"systemctl\s+(?:restart|stop|reload)\s+\S+"),
+     "uji config + jumlah koneksi yang terputus"),
+    (re.compile(r"\brm\s+(?:-\S+\s+)*\S+"), "ukuran & isi yang akan hilang"),
+    (re.compile(r"\bcomposer\s+(?:install|update|require)\b"), "paket lewat --dry-run"),
+    (re.compile(r"\bnpm\s+(?:install|ci)\b"), "paket lewat --dry-run"),
+    (re.compile(r"\bpip3?\s+install\b"), "paket lewat --dry-run"),
+    (re.compile(r"\bcertbot\s+renew\b(?!.*--dry-run)"), "renewal percobaan --dry-run"),
+    (re.compile(r"\brsync\b(?!.*\s-\w*n)"), "file yang disalin/dihapus lewat rsync -n"),
+    (re.compile(r"\b(?:mysql|psql|mariadb)\b.*-e\s+['\"].*\b(?:DELETE|UPDATE)\b",
+                re.IGNORECASE | re.DOTALL), "jumlah baris terkena lewat SELECT COUNT(*)"),
+]
+
+
+def _rehearsal_hint(command: str) -> str:
+    """Sebutkan gladi yang tersedia untuk perintah ini (string kosong bila tak ada)."""
+    for rx, what in _REHEARSABLE:
+        if rx.search(command):
+            return f"Gladi : rehearse() bisa menunjukkan {what} — jalankan dulu"
+    return ""
 
 _VALID_MODES = ("setup", "deploy", "production")
 
 
+def _read_mode_file(path: str) -> str:
+    try:
+        with open(path) as f:
+            m = f.read().strip().lower()
+            return m if m in _VALID_MODES else ""
+    except (FileNotFoundError, PermissionError, OSError):
+        return ""
+
+
 def _get_mode() -> str:
-    """Baca mode operasi ODIN — per project (v2) atau legacy (v1)."""
+    """Baca mode operasi ODIN — per project (v2) atau legacy (v1).
+
+    `~/.odin_mode` (file BERSAMA warisan v1) hanya dibaca bila project TIDAK
+    terdeteksi. Dulu ia juga dibaca saat project terdeteksi tapi file modenya
+    belum ada — sehingga satu sesi tanpa identitas project yang menulis
+    `production` ke sana membuat SEMUA project yang belum pernah menjalankan
+    inspect_server ikut dianggap production. Mode project yang belum diketahui
+    adalah `deploy` (default), bukan tebakan dari project lain."""
     project = _detect_project()
     if project:
-        mode_file = os.path.expanduser(f"~/.odin/modes/{project}")
-        try:
-            with open(mode_file) as f:
-                m = f.read().strip().lower()
-                if m in _VALID_MODES:
-                    return m
-        except (FileNotFoundError, PermissionError, OSError):
-            pass
-    try:
-        with open(os.path.expanduser("~/.odin_mode")) as f:
-            m = f.read().strip().lower()
-            if m in _VALID_MODES:
-                return m
-    except (FileNotFoundError, PermissionError, OSError):
-        pass
+        m = _read_mode_file(os.path.expanduser(f"~/.odin/modes/{project}"))
+        if m:
+            return m
+    else:
+        m = _read_mode_file(os.path.expanduser("~/.odin_mode"))
+        if m:
+            return m
     m = os.environ.get("ODIN_MODE", "").strip().lower()
     return m if m in _VALID_MODES else "deploy"
 
@@ -647,6 +760,9 @@ def risk_card(command: str, extra: str = "", mode: str = "deploy",
     undo = _undo_hint(command)
     if undo:
         lines.append(f"Undo  : {undo}")
+    gladi = _rehearsal_hint(command)
+    if gladi:
+        lines.append(gladi)
     if mode == "production":
         lines.append("⚠️  Mode PRODUCTION — tier dinaikkan 1 level.")
     if tier == "KRITIS":

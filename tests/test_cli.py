@@ -172,9 +172,10 @@ class TestSettingsJsonGeneration:
                 "key": str(tmp_path / "keys" / "vps-app"),
             })
 
-            with patch.object(odin_cli.SSHSession, "connect"), \
-                 patch.object(odin_cli.SSHSession, "run", return_value=("", "", 0)), \
-                 patch.object(odin_cli.SSHSession, "close"), \
+            with patch.object(odin_cli.AgentSession, "connect"), \
+                 patch.object(odin_cli.AgentSession, "provision",
+                              return_value=(True, "root_exists=1")), \
+                 patch.object(odin_cli.AgentSession, "close"), \
                  patch.object(odin_cli, "ask_input", side_effect=[
                      "simuru",             # nama project
                      "/var/www/simuru",     # path di server
@@ -397,9 +398,13 @@ class TestProjectStatus:
                 "remote_root": "/var/www/simuru",
                 "local_workdir": str(workdir),
             })
-            with patch.object(odin_cli.SSHSession, "connect"), \
-                 patch.object(odin_cli.SSHSession, "run", return_value=("", "", 0)), \
-                 patch.object(odin_cli.SSHSession, "close"):
+            report = {"projects": [{"name": "simuru", "memory": True}]}
+            with patch.object(odin_cli.AgentSession, "connect"), \
+                 patch.object(odin_cli.AgentSession, "diagnose",
+                              return_value=(report, "")), \
+                 patch.object(odin_cli, "_mcp_handshake",
+                              return_value=(True, "20 tools")), \
+                 patch.object(odin_cli.AgentSession, "close"):
                 odin_cli.cmd_project_status("simuru")
         out = capsys.readouterr().out
         assert "simuru" in out
@@ -547,9 +552,10 @@ class TestProjectAddNonInteractive:
             args = SimpleNamespace(name="foo", server="gibtha_srv",
                                    remote_root="/var/www/foo",
                                    workdir=str(workdir), yes=True)
-            with patch.object(odin_cli.SSHSession, "connect"), \
-                 patch.object(odin_cli.SSHSession, "run", return_value=("", "", 0)), \
-                 patch.object(odin_cli.SSHSession, "close"), \
+            with patch.object(odin_cli.AgentSession, "connect"), \
+                 patch.object(odin_cli.AgentSession, "provision",
+                              return_value=(True, "root_exists=1")), \
+                 patch.object(odin_cli.AgentSession, "close"), \
                  patch.object(odin_cli, "ask_input",
                               side_effect=AssertionError("tidak boleh prompt di mode --yes")):
                 odin_cli.cmd_project_add(args)

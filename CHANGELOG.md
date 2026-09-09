@@ -6,6 +6,248 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-09-09
+
+Rilis besar dengan tiga bagian. **(1) Keamanan**: menutup tujuh bug dari *Audit Kunci
+Terbatas* atas v2.3.0 — separuh CLI memperlakukan sesi SSH ber-kunci *forced-command*
+seolah punya shell penuh, padahal kunci itu sengaja dirancang tidak punya. **(2) Isolasi**:
+satu kebocoran mode operasi antar project dan satu namespace bersama yang kurang terlihat.
+**(3) Tiga tool baru** yang menjawab tiga rasa sakit sysadmin saat bekerja lewat sesi chat:
+takut merusak, kehilangan konteks, dan panik saat insiden.
+
+907 test (dari 771), semuanya lulus. MCP tools: 20 → 23.
+
+### Security — akar tunggal: kunci forced-command tak punya shell
+
+`SSHSession.run()` mengirim perintah lewat `exec_command()`. Untuk sesi yang login sebagai
+user `odin`, `authorized_keys` memasang `command="odin-dispatch.sh"` — sshd **membuang**
+perintah yang diminta dan menjalankan dispatcher sebagai gantinya. Jadi setiap `ssh.run()`
+di sesi ber-kunci-odin tidak pernah menjalankan apa yang ditulis pemanggilnya, dan sebelas
+call-site tak satu pun mendeteksinya. Cacat kedua di fungsi yang sama: `run()` hanya membaca
+`stdout`/`stderr` dan **tidak pernah menulis ke `stdin`**, sehingga handshake MCP mustahil
+bahkan seandainya forced-command tidak ada.
+
+### Fixed — tujuh bug
+
+- **B1 (Kritis) — `server harden` membatalkan pengerasan yang baru dipasangnya.** Verifikasi
+  memakai probe ber-kunci `odin` yang kena B6 dan **selalu** gagal, sehingga
+  `_restore_authorized_keys()` dipanggil dan pengerasan di-rollback. Fitur keamanan yang
+  otomatis mengembalikan dirinya sendiri; server lama tak akan pernah bisa dikeraskan.
+  Pola identik di `cmd_update` langkah 6 ikut diperbaiki.
+- **B2 (Tinggi) — `project add` melaporkan sukses palsu.** `cat > projects/<name>.conf` dan
+  `mkdir memory/<name>` dikirim lewat kunci terbatas, ditolak, **rc-nya dibuang**, dan
+  `progress()` mencetak "✓" tanpa syarat. Project tak pernah ter-provisioning; MCP mati dengan
+  `FATAL: project tidak ditemukan` dan Claude Code menampilkan `odin (CONNECTION_CLOSED)`
+  tanpa petunjuk. Peringatan "⚠ path tidak ditemukan di server" juga selalu muncul & selalu salah.
+- **B3 (Tinggi) — audit keamanan gagal-terbuka.** `_audit_remote_sudoers()` mengembalikan `[]`
+  dan `_audit_remote_key()` mengembalikan `True` saat file **tidak terbaca** — audit yang
+  melapor "aman" tepat ketika ia buta. Lebih berbahaya daripada FAIL palsu: server yang
+  benar-benar rentan lolos diam-diam.
+- **B4 (Tinggi) — `odin update <alias>` tidak bisa dipakai sama sekali.** `upload()` membuka
+  subsystem SFTP; forced-command memblokir negosiasi subsystem (`EOF during negotiation`),
+  jadi upload mati di langkah pertama. Tak ada jalur upgrade agent selain mengulang `server add`.
+- **B5 (Sedang) — `doctor`, `server test`, `project status` melapor FAIL menyeluruh.** Lima
+  pemeriksaan `test -f`/`-x`/`-d` **secara struktural tak akan pernah bisa bernilai OK**,
+  sesehat apa pun servernya. Gejala pendamping: baris `Disk:`/`Memory:` hilang dari keluaran
+  dan versi tercetak `v?`.
+- **B6 (Sedang) — `_mcp_handshake` mustahil lewat kunci terbatas.** Payload JSON-RPC
+  disisipkan ke dalam *string perintah* (`printf … | run.sh`) — persis bagian yang dibuang
+  forced-command. Inilah sebabnya wizard melaporkan "Handshake MCP OK (20 tools)" sementara
+  `doctor` melaporkan GAGAL untuk server yang sama di menit yang sama.
+- **B7 (Rendah) — `server remove --purge` tidak bisa mencabut kunci.** `grep -v` + `mv` lewat
+  sesi terbatas, ditolak seperti yang lain. Kunci yang sudah dihapus dari laptop tetap
+  dipercaya server.
+
+### Changed — `SSHSession` dipecah menurut kemampuan nyata
+
+Ketujuh bug muncul karena satu tipe objek dipakai untuk dua kemampuan berbeda. Batasan yang
+dulu hanya hidup di `authorized_keys` kini ikut hidup di kode:
+
+- **`AdminSession`** — login password/admin, shell penuh. Satu-satunya yang punya `run()` dan
+  `upload()`. Mendeteksi bila ternyata kena dispatcher dan melempar `ForcedCommandRejected`.
+- **`AgentSession`** — login kunci ODIN terbatas. Hanya `handshake()`, `diagnose()`,
+  `provision()`. `run()`/`upload()` **selalu melempar `ForcedCommandRejected`** dengan pesan
+  yang menyebut alternatif yang benar — tujuh kegagalan senyap jadi tujuh error yang jelas.
+- `_mcp_handshake()` mengirim payload lewat **stdin** lalu `shutdown_write()`; perintahnya kini
+  hanya `run.sh [--project <nama>]`. Satu perubahan ini memperbaiki B6, B5, dan B1 sekaligus.
+- Audit keamanan bernilai **tiga keadaan**: `[]`/`False` (aman), temuan (rentan), dan `None`
+  (**TAK TERBACA**). `doctor` mencetak `[UNKN]` — tidak pernah gagal-terbuka.
+- `project add`, `update`, dan `remove --purge` memeriksa rc setiap penulisan **sebelum**
+  mencetak centang. Provisioning yang gagal tidak lagi menulis config lokal.
+
+### Added — kanal kontrol sempit di `run.sh` (K4)
+
+Supaya alur bebas-password tetap utuh **tanpa** memberi shell, `run.sh` menerima dua
+sub-perintah yang divalidasi di sisi server, dan `odin-dispatch.sh` meneruskan keduanya:
+
+- **`run.sh --diagnose`** — server melaporkan keadaannya sendiri (keberadaan file, versi agent,
+  modul `mcp`, disk, memory, daftar project + memory dir, isi sudoers & authorized_keys).
+  Bagian yang tak terbaca ditandai eksplisit `@@UNREADABLE@@`/`@@ABSENT@@`, jadi sisi laptop
+  selalu bisa membedakan "aman" dari "buta". Satu round-trip menggantikan sembilan perintah shell.
+- **`run.sh --provision <nama> --root <path>`** — membuat `projects/<nama>.conf` (mode 600) +
+  `memory/<nama>/` (mode 700). Menolak menimpa conf yang sudah ada (menimpa = membajak
+  `PROJECT_ROOT` project lain yang sedang jalan). Nama dibatasi `[A-Za-z0-9._-]`; path wajib
+  absolut, tanpa `..`, charset tertutup — divalidasi di dispatcher **dan** di `run.sh`.
+- Server pra-v2.4 menolak kedua verb ini; CLI mendeteksinya dan menyebut `odin update <alias>`,
+  atau menawarkan fallback lewat kredensial admin. Tidak ada yang gagal senyap.
+- Sudoers menambah satu aturan berargumen **tertutup** `/usr/bin/cat /etc/sudoers.d/odin`
+  (tanpa wildcard, jadi tak bisa dipakai membaca file lain) supaya `--diagnose` dapat memeriksa
+  kebijakannya sendiri tanpa kredensial admin.
+
+### Changed — operasi yang kini meminta kredensial admin
+
+Tiga perintah memang **mustahil** lewat kunci terbatas dan sekarang memintanya secara terus
+terang alih-alih gagal diam-diam: `odin update <alias>` (SFTP), `odin server remove --purge`
+(menulis `authorized_keys`), dan fallback `odin project add` bila server belum mengenal
+`--provision`. `project add` pada server v2.4 tetap bebas password.
+
+### Added — Gladi (`rehearse`): pratinjau nyata sebelum perintah destruktif
+
+Kartu risiko hanya memberi LABEL ("TINGGI — undo: git reflog"). Yang sebenarnya ingin
+diketahui operator sebelum menekan "ya" adalah BUKTI. Rasa takut merusak itulah yang
+membuat orang akhirnya SSH manual dan melewati ODIN sama sekali.
+
+`rehearse(command, cwd)` menjalankan padanan dry-run **resmi** dari tool bersangkutan —
+bukan simulasi ODIN — jadi yang dilaporkan adalah kebenaran dari tool itu sendiri:
+
+| Perintah | Gladi | Yang terlihat |
+|---|---|---|
+| `artisan migrate` | `migrate --pretend` | SQL lengkap |
+| `git reset --hard` | `git log`/`diff`/`status` | commit yang dibuang + perubahan lokal yang hilang |
+| `apt install` | `apt-get -s` | daftar paket |
+| `systemctl restart` | `nginx -t`, `php-fpm -t` | uji config + jumlah koneksi yang terputus |
+| `rm -rf` | `du -sh`, `find` | ukuran & isi |
+| composer/npm/pip | `--dry-run` | paket yang berubah |
+| `certbot renew` | `--dry-run` | renewal percobaan |
+| `rsync` | `rsync -n` | file yang disalin/dihapus |
+| `DELETE`/`UPDATE` SQL | `SELECT COUNT(*)` | jumlah baris terkena, WHERE sama persis |
+
+- **Gladi yang GAGAL bisa memblokir.** `nginx -t` merah = service tak akan naik lagi
+  setelah restart; `blocking: true` memberitahu Claude untuk membatalkan. Kegagalan
+  ditemukan di latihan, bukan di produksi.
+- **`runbook(..., rehearse=True)`** mempratinjau SELURUH runbook tanpa mengeksekusi
+  satu langkah pun, dan melaporkan langkah mana yang memblokir.
+- **`laravel_deploy` otomatis menggladi migrasi** di preflight (`checks.migration_preview`)
+  — migrasi adalah langkah paling sulit di-undo, jadi ia yang paling pantas dipratinjau.
+- **Kartu risiko guard menawarkannya**: baris `Gladi : rehearse() bisa menunjukkan …`
+  muncul untuk perintah yang punya pratinjau. Pola guard & agent dijaga sinkron oleh test.
+
+### Added — Serah-Terima (`handover`): "apa yang terjadi sejak saya terakhir di sini?"
+
+Digest memory menyuntikkan fakta STATIS (versi PHP, nama service). Yang hilang adalah
+DELTA. Operator membuka sesi Senin pagi dan harus bertanya sendiri: ada deploy Jumat
+malam? nginx pernah restart? disk naik?
+
+Ringkasan otomatis disuntikkan ke konteks tiap sesi baru:
+
+```
+## SERAH-TERIMA simuru (sejak 2026-09-06 14:32, 2 hari 10 jam lalu)
+• Deploy sukses — 2026-09-09 00:50 (branch=main path=/var/www/simuru)
+• 2× aksi service: restart nginx, restart php8.3-fpm
+• 1 perintah gagal — terakhir: php artisan horizon:status
+• [gibtha] service_restart: mysql di-restart
+```
+
+- Menghimpun dari sumber yang sudah ada: `audit.jsonl`, event cortex lintas-project,
+  ring-buffer `metrics-history` (tren disk/memory), fingerprint deploy (drift), dan
+  frekuensi error berulang.
+- **Watermark** `MEMORY_DIR/last_seen` menandai kapan sesi terakhir dimulai; digeser
+  otomatis setiap startup, SETELAH laporan disusun.
+- **Nol subprocess di jalur startup.** `_build_handover(deep=False)` hanya membaca file.
+  Deteksi drift (4 subprocess git/php) hanya berjalan lewat tool `handover()` eksplisit.
+  Ini penting: startup punya anggaran ~30 detik dari Claude Code, dan inspeksi penuh
+  pernah membuat server gagal connect karena dijalankan di waktu import.
+
+### Added — Triase (`triage`): satu perintah saat sesuatu mati jam 2 pagi
+
+Saat situs 502, operator tidak ingin memilih dari 20 tool — ia ingin menyebut GEJALA dan
+mendapat hipotesis terurut plus satu tindakan berikutnya.
+
+`triage(symptom)` menjalankan sapuan bukti read-only (< 15 detik), mengorelasikannya,
+lalu memeringkat hipotesis berdasarkan bukti yang cocok:
+
+```
+502 bad gateway → gateway-error (6 bukti, 0.2 detik)
+  1. (kuat) php-fpm mati atau socket-nya hilang
+     bukti: socket tidak ada, php-fpm tidak aktif
+  TINDAKAN: systemctl restart php8.3-fpm
+  KONTEKS: deploy 00:50 (ok), [gibtha] mysql di-restart
+```
+
+- **8 peta gejala**: gateway-error (502/504), disk-penuh, database-down, lambat, ssl,
+  deploy-gagal, service-mati, memory. Gejala tak dikenal → sapuan umum.
+- **Pemeringkatan yang bisa dijelaskan**: hitung `signals` yang muncul di keluaran bukti,
+  berbobot (socket hilang = 3, "timeout" = 1). Tanpa ML. Tanpa bukti → jawabannya jujur
+  "Tak ada pola dikenali", bukan tebakan.
+- **`next_action` hanya SARAN** — tidak pernah dijalankan sendiri.
+- **Post-mortem menulis dirinya**: timeline insiden dicatat ke memory (`server:incident-*`)
+  dan ke event cortex, jadi project tetangga ikut tahu.
+
+### Added — namespace bersama menyebut konsekuensinya
+
+Namespace `profile` dan `cross` hidup di `memory/_cortex/` dan dibagi SEMUA project di
+server yang sama (ini disengaja: satu pemilik, dan event lintas-project berguna karena
+nginx/mysql memang dipakai bersama). Tapi label `scope: cortex (global)` di respons
+`memory_write` mudah terlewat.
+
+`memory_write` ke namespace cortex kini mengembalikan `_shared: true` plus
+`_shared_warning` yang menyebutkan berapa dan project mana saja yang akan melihatnya
+(`_sibling_projects()` membaca `projects/*.conf`), serta alternatif yang benar untuk
+fakta project-spesifik (`ns='server'`/`'instruction'`). Namespace per-project tidak
+diberi tanda apa pun — peringatan palsu sama buruknya dengan diam.
+
+### Fixed — mode operasi bocor antar project lewat `~/.odin_mode`
+
+`_get_mode()` membaca file BERSAMA warisan v1 (`~/.odin_mode`) bukan hanya saat project
+tak terdeteksi, tapi juga saat project **terdeteksi tapi file modenya belum ada**. Akibatnya
+satu sesi tanpa identitas project (config `.mcp.json` lama, atau entry tanpa `--project`)
+yang menulis `production` ke sana membuat SETIAP project yang belum pernah menjalankan
+`inspect_server` ikut dianggap production.
+
+Dampaknya terbatas — mode `production` hanya **menaikkan** tier risiko, tak pernah
+melonggarkan — jadi ini soal kartu risiko yang membingungkan, bukan perintah berbahaya
+yang lolos. Sekarang file bersama hanya dibaca bila project tidak terdeteksi sama sekali
+(kompatibilitas v1.x tetap utuh); project yang modenya belum diketahui memakai default
+`deploy`, bukan tebakan dari project lain.
+
+- `odin project add` dan `odin project sync` menyemai `~/.odin/modes/<project>` berisi
+  `deploy` lewat `_seed_project_mode()` — idempoten, mode yang sudah tersinkron dari
+  `inspect_server` tidak ditimpa. Papan mode tiap project kini terisi sejak menit pertama.
+
+### Fixed — celah klasifikasi READ di guard (ditemukan saat membangun Gladi & Triase)
+
+Perintah yang benar-benar read-only tapi selama ini meminta konfirmasi — gesekan yang
+justru muncul saat operator sedang mendiagnosis:
+
+- **Pipa di dalam kutip dipecah sebagai operator shell.** `grep -E 'error|warn' file`
+  — perintah read paling lumrah — jadi dua segmen, dan segmen kedua tak dikenali.
+  `_split_segments()` kini memasker isi kutip sebelum memecah.
+- **`WHERE a < 10` dikira redirect input.** Pasangan dari perbaikan `>` yang sudah ada
+  lebih dulu; `_db_seg_is_read` kini memeriksa `<` pada teks yang kutipnya sudah dikosongkan.
+- `php artisan migrate --pretend` dan flag `--dry-run` resmi (composer/npm/pip/certbot),
+  `apt-get -s`, `git -C <path> status`, `systemctl --failed`, `swapon --show` kini READ.
+- Batasnya tetap: `composer install`, `apt-get install`, `git push`, `systemctl restart`,
+  `mysql < dump.sql`, dan `DELETE` tetap meminta konfirmasi. `mysqladmin` sengaja
+  DIBIARKAN sebagai write — keputusan lama yang bertest, tidak dilonggarkan demi kenyamanan.
+
+### Tests
+
+907 test dari 771, tersebar di 19 file (2 file baru).
+
+- `tests/test_forced_command.py` (54) — regresi kunci terbatas: perintah shell lewat
+  `AgentSession` meledak alih-alih memberi hasil palsu; payload handshake ada di stdin dan
+  **tidak** di string perintah; audit tiga keadaan; penulisan diperiksa rc-nya. Termasuk uji
+  batas dispatcher (5 bentuk diizinkan, 11 ditolak — traversal, metakarakter, arity salah)
+  serta uji `run.sh --diagnose`/`--provision` sungguhan lewat subprocess.
+- `tests/test_innovations.py` (49) — Gladi **tidak pernah menjalankan perintah aslinya**
+  (diuji atas 9 perintah destruktif), setiap probe gladi & triase lolos klasifikasi READ
+  guard, Serah-Terima **nol subprocess** di jalur startup, dan pemeringkatan hipotesis
+  triase menurun monoton.
+- `tests/test_guard.py` +16 — celah klasifikasi READ, termasuk batas yang harus TETAP
+  meminta konfirmasi.
+- `tests/test_guard_multiproject.py` +4 — kebocoran mode antar project.
+- `tests/test_cortex.py` +7 — peringatan namespace bersama.
+
 ## [2.3.0] - 2026-09-08
 
 Rilis perbaikan berdasarkan review keamanan & robustness eksternal atas v2.2.0.

@@ -15,7 +15,7 @@ Non-interaktif (batch):
 """
 from __future__ import annotations
 
-__version__ = "2.3.0"
+__version__ = "2.5.0"
 
 import argparse
 import getpass
@@ -180,6 +180,10 @@ READ_ONLY_TOOLS = [
     "mcp__odin__inspect_server", "mcp__odin__audit_tail",
     "mcp__odin__runbook_templates", "mcp__odin__cortex_events",
     "mcp__odin__run_tests",
+    # v2.5 — read-only: rehearse hanya menjalankan padanan dry-run, handover
+    # membaca audit/event, triage adalah sapuan bukti. Harus SINKRON dengan
+    # READ_ONLY_TOOLS di odin_guard.py (ada test yang menjaganya).
+    "mcp__odin__rehearse", "mcp__odin__handover", "mcp__odin__triage",
 ]
 
 # Matcher hook: SEMUA tool odin lewat guard. Dengan matcher sempit, tool baru
@@ -542,8 +546,34 @@ def get_odin_version() -> str:
 
 
 # ── SSH Session ─────────────────────────────────────────────────────────────
+class ForcedCommandRejected(RuntimeError):
+    """Perintah shell dikirim lewat sesi ber-kunci forced-command.
+
+    Kunci ODIN dipasang `restrict,command="odin-dispatch.sh"`, jadi sshd MEMBUANG
+    perintah yang diminta dan menjalankan dispatcher. Dulu kegagalan ini muncul
+    sebagai `rc != 0` biasa, dan tujuh call-site salah menafsirkannya sebagai
+    "file tidak ada" / "server rusak". Sekarang ia meledak keras."""
+
+
+# Banner dari odin-dispatch.sh saat menolak. Dipakai untuk membedakan "ditolak
+# dispatcher" dari "perintah jalan tapi gagal".
+_DISPATCH_DENY_MARK = "ODIN: perintah ditolak"
+
+
 class SSHSession:
-    """Wrapper paramiko untuk koneksi SSH."""
+    """Koneksi SSH dasar: connect/close + eksekusi tingkat rendah.
+
+    SENGAJA tidak punya run()/upload(). Dua kemampuan yang berbeda dipisah ke
+    subclass supaya batasan yang hidup di authorized_keys juga hidup di kode:
+
+      AdminSession — login password/admin, shell penuh, boleh run() & upload().
+      AgentSession — login kunci ODIN terbatas, HANYA handshake/diagnose/provision.
+
+    Sebelum pemisahan ini, satu tipe dipakai untuk keduanya dan tujuh bug lahir
+    dari sana (lihat ForcedCommandRejected)."""
+
+    #: True bila kunci yang dipakai tunduk pada forced-command.
+    restricted = False
 
     def __init__(self, host: str, port: int, user: str, *,
                  password: str | None = None, key_path: str | None = None):
@@ -579,12 +609,44 @@ class SSHSession:
             kwargs["look_for_keys"] = True
         self.client.connect(**kwargs)
 
-    def run(self, cmd: str, timeout: int = 60) -> tuple[str, str, int]:
+    def _exec(self, cmd: str, timeout: int = 60,
+              stdin_data: str | None = None) -> tuple[str, str, int]:
+        """Eksekusi mentah. `stdin_data` DIKIRIM ke stdin lalu kanal ditutup.
+
+        Menulis stdin itu wajib untuk handshake MCP: agent membaca protokol dari
+        stdin dan baru keluar saat EOF. Versi lama hanya membaca stdout/stderr,
+        jadi handshake mustahil bahkan tanpa forced-command."""
         assert self.client is not None
-        _, stdout, stderr = self.client.exec_command(cmd, timeout=timeout)
+        stdin, stdout, stderr = self.client.exec_command(cmd, timeout=timeout)
+        if stdin_data is not None:
+            try:
+                stdin.write(stdin_data)
+                stdin.flush()
+                stdin.channel.shutdown_write()
+            except OSError:
+                pass                    # remote sudah menutup — biarkan hasilnya dibaca
         out = stdout.read().decode(errors="replace")
         errs = stderr.read().decode(errors="replace")
         rc = stdout.channel.recv_exit_status()
+        return out, errs, rc
+
+    def close(self) -> None:
+        if self.client:
+            self.client.close()
+            self.client = None
+
+
+class AdminSession(SSHSession):
+    """Sesi shell penuh (user admin + password). Satu-satunya yang boleh run()."""
+
+    def run(self, cmd: str, timeout: int = 60,
+            stdin_data: str | None = None) -> tuple[str, str, int]:
+        out, errs, rc = self._exec(cmd, timeout=timeout, stdin_data=stdin_data)
+        # Sesi admin seharusnya tak pernah kena dispatcher; kalau kena, kredensial
+        # yang dipakai bukan admin — jangan diam-diam salah tafsir.
+        if _DISPATCH_DENY_MARK in errs or _DISPATCH_DENY_MARK in out:
+            raise ForcedCommandRejected(
+                f"sesi {self.user}@{self.host} ternyata tunduk forced-command: {cmd[:80]}")
         return out, errs, rc
 
     def upload(self, local_path: str, remote_path: str) -> None:
@@ -593,10 +655,70 @@ class SSHSession:
         sftp.put(local_path, remote_path)
         sftp.close()
 
-    def close(self) -> None:
-        if self.client:
-            self.client.close()
-            self.client = None
+
+class AgentSession(SSHSession):
+    """Sesi kunci ODIN terbatas: forced-command, TANPA shell.
+
+    Hanya tiga operasi yang mungkin — semuanya lewat kanal kontrol run.sh."""
+
+    restricted = True
+
+    def __init__(self, host: str, port, key_path: str | None = None):
+        super().__init__(host, int(port), "odin", key_path=key_path)
+
+    def run(self, cmd: str, timeout: int = 60,
+            stdin_data: str | None = None) -> tuple[str, str, int]:
+        """Selalu meledak. Ada supaya call-site yang keliru dapat pesan jelas,
+        bukan AttributeError — dan TIDAK PERNAH hasil palsu."""
+        raise ForcedCommandRejected(
+            f"kunci ODIN tak punya shell; perintah ini mustahil: {cmd[:80]!r}. "
+            f"Pakai AdminSession (kredensial admin) atau kanal kontrol "
+            f"handshake()/diagnose()/provision().")
+
+    def upload(self, local_path: str, remote_path: str) -> None:
+        raise ForcedCommandRejected(
+            "SFTP diblokir forced-command — upload butuh AdminSession.")
+
+    def _control(self, args: str, timeout: int = 40,
+                 stdin_data: str | None = "") -> tuple[str, str, int]:
+        """Panggil run.sh lewat dispatcher. `args` sudah tervalidasi pemanggil."""
+        cmd = f"{ODIN_REMOTE_HOME}/run.sh{args}"
+        return self._exec(cmd, timeout=timeout, stdin_data=stdin_data)
+
+    def handshake(self, project: str = "") -> tuple[bool, str]:
+        args = f" --project {shlex.quote(project)}" if project else ""
+        try:
+            out, errs, _ = self._control(args, timeout=40, stdin_data=_MCP_INIT)
+        except Exception as e:
+            return False, f"eksekusi gagal: {e}"
+        return _parse_mcp_reply(out, errs)
+
+    def diagnose(self) -> tuple[dict | None, str]:
+        """Return (laporan, catatan). laporan None = tak bisa dibaca."""
+        try:
+            out, errs, rc = self._control(" --diagnose", timeout=60, stdin_data="")
+        except Exception as e:
+            return None, f"eksekusi gagal: {e}"
+        if "@@ODIN-DIAGNOSE@@" not in out:
+            if _DISPATCH_DENY_MARK in errs or _DISPATCH_DENY_MARK in out:
+                return None, ("dispatcher server masih versi lama (belum kenal "
+                              "--diagnose) — jalankan: odin update <alias>")
+            return None, (errs or out).strip()[:200] or f"rc={rc}"
+        return _parse_diagnose(out), ""
+
+    def provision(self, name: str, root: str) -> tuple[bool, str]:
+        """Buat projects/<name>.conf + memory dir di server. Return (sukses, detail)."""
+        args = (f" --provision {shlex.quote(name)} --root {shlex.quote(root)}")
+        try:
+            out, errs, rc = self._control(args, timeout=30, stdin_data="")
+        except Exception as e:
+            return False, f"eksekusi gagal: {e}"
+        if "@@ODIN-PROVISION@@" in out and rc == 0:
+            return True, out
+        if _DISPATCH_DENY_MARK in errs or _DISPATCH_DENY_MARK in out:
+            return False, ("dispatcher server masih versi lama (belum kenal "
+                           "--provision)")
+        return False, (errs or out).strip()[:200] or f"rc={rc}"
 
 
 # Langkah remote yang GAGAL selama `server add` (rc != 0). Dulu semua rc diabaikan
@@ -606,7 +728,7 @@ _FAILED_STEPS: list = []
 SERVER_FILES = ("odin_agent.py", "run.sh", "odin-dispatch.sh")
 
 
-def _upload_server_file(ssh: "SSHSession", pp: str, name: str, mode: str) -> bool:
+def _upload_server_file(ssh: "AdminSession", pp: str, name: str, mode: str) -> bool:
     """Upload satu file server ke /home/odin dengan izin & owner benar."""
     src = ODIN_INSTALL_DIR / "server" / name
     if not src.exists():
@@ -638,31 +760,71 @@ VULNERABLE_SUDOERS_PATTERNS = [
 ]
 
 
-def _audit_remote_sudoers(ssh: "SSHSession", pp: str = "") -> list[str]:
-    """Daftar temuan pada /etc/sudoers.d/odin di server. Kosong = aman."""
-    out, _, rc = ssh.run(f"{pp}cat /etc/sudoers.d/odin 2>/dev/null")
-    if rc != 0 or not out.strip():
-        return []
-    rules = "\n".join(l for l in out.splitlines()
-                       if l.strip() and not l.lstrip().startswith("#"))
+def _tri(state: bool | None) -> str:
+    """Label tiga keadaan. None = tak terbaca — BUKAN OK, bukan FAIL."""
+    if state is None:
+        return _c("0;33", "UNKN")
+    return _c("0;32", "OK") if state else _c("0;31", "FAIL")
+
+
+def _scan_sudoers(text: str) -> list[str]:
+    """Temuan pola rentan pada isi /etc/sudoers.d/odin. Kosong = tak ada temuan."""
+    rules = "\n".join(l for l in text.splitlines()
+                      if l.strip() and not l.lstrip().startswith("#"))
     found = [why for pat, why in VULNERABLE_SUDOERS_PATTERNS if pat in rules]
     if "journalctl" in rules and "journalctl --no-pager" not in rules:
         found.append("journalctl tanpa --no-pager → pager sebagai root = shell root")
     return found
 
 
-def _audit_remote_key(ssh: "SSHSession", pp: str = "") -> bool:
-    """True bila SEMUA kunci di authorized_keys sudah ber-forced-command."""
-    out, _, rc = ssh.run(f"{pp}cat {ODIN_REMOTE_HOME}/.ssh/authorized_keys 2>/dev/null")
-    if rc != 0:
-        return True                     # tak terbaca → jangan mengklaim apa pun
-    lines = [l for l in out.splitlines() if l.strip() and not l.lstrip().startswith("#")]
+def _scan_authorized_keys(text: str) -> bool:
+    """True bila SEMUA kunci di isi authorized_keys sudah ber-forced-command."""
+    lines = [l for l in text.splitlines() if l.strip() and not l.lstrip().startswith("#")]
     if not lines:
-        return True
+        return True                     # tak ada kunci = tak ada kunci ber-shell
     return all("command=" in l for l in lines)
 
 
-def _write_authorized_keys(ssh: "SSHSession", pubkey: str, pp: str = "") -> tuple[bool, str]:
+def _audit_remote_sudoers(ssh, pp: str = "") -> list[str] | None:
+    """Temuan pada /etc/sudoers.d/odin. [] = aman, [...] = rentan, None = TAK TERBACA.
+
+    None itu penting. Versi lama mengembalikan [] saat `cat` gagal, sehingga
+    `doctor` mencetak "OK" justru ketika ia buta — server yang benar-benar rentan
+    lolos diam-diam. Gagal-terbuka pada audit keamanan lebih berbahaya daripada
+    FAIL palsu, jadi sekarang ketidaktahuan punya nilainya sendiri."""
+    # Bedakan "file tidak ada" (bukan temuan) dari "tak boleh baca" (tidak tahu).
+    probe = (f"{pp}sh -c 'if [ -e /etc/sudoers.d/odin ]; then "
+             f"cat /etc/sudoers.d/odin; else echo @@ABSENT@@; fi'")
+    try:
+        out, _, rc = ssh.run(probe)
+    except ForcedCommandRejected:
+        return None
+    if rc != 0:
+        return None
+    if "@@ABSENT@@" in out:
+        return []
+    if not out.strip():
+        return None
+    return _scan_sudoers(out)
+
+
+def _audit_remote_key(ssh, pp: str = "") -> bool | None:
+    """True = semua kunci forced-command, False = ada yang beri shell,
+    None = TAK TERBACA (jangan mengklaim apa pun)."""
+    ak = f"{ODIN_REMOTE_HOME}/.ssh/authorized_keys"
+    probe = f"{pp}sh -c 'if [ -e {ak} ]; then cat {ak}; else echo @@ABSENT@@; fi'"
+    try:
+        out, _, rc = ssh.run(probe)
+    except ForcedCommandRejected:
+        return None
+    if rc != 0:
+        return None                     # tak terbaca → jangan mengklaim apa pun
+    if "@@ABSENT@@" in out:
+        return True
+    return _scan_authorized_keys(out)
+
+
+def _write_authorized_keys(ssh: "AdminSession", pubkey: str, pp: str = "") -> tuple[bool, str]:
     """Tulis baris forced-command untuk pubkey ini. Return (sukses, isi_lama)."""
     ak = f"{ODIN_REMOTE_HOME}/.ssh/authorized_keys"
     old, _, _ = ssh.run(f"{pp}cat {ak} 2>/dev/null")
@@ -676,7 +838,7 @@ def _write_authorized_keys(ssh: "SSHSession", pubkey: str, pp: str = "") -> tupl
     return rc == 0, old
 
 
-def _restore_authorized_keys(ssh: "SSHSession", old: str, pp: str = "") -> None:
+def _restore_authorized_keys(ssh: "AdminSession", old: str, pp: str = "") -> None:
     ak = f"{ODIN_REMOTE_HOME}/.ssh/authorized_keys"
     ssh.run(f"printf '%s' {shlex.quote(old)} | {pp}tee {ak} > /dev/null && {pp}chmod 600 {ak}")
 
@@ -775,25 +937,8 @@ _MCP_INIT = (
 )
 
 
-def _mcp_handshake(ssh: "SSHSession", project: str = "",
-                   pp: str | None = None) -> tuple[bool, str]:
-    """Jalankan run.sh lewat SSH & lakukan handshake MCP sungguhan.
-
-    `test -f run.sh` tak membuktikan apa pun: run.sh rusak atau syntax error di
-    agent tetap lulus. Ini mengirim initialize + tools/list lalu menghitung tool
-    yang dikembalikan.
-
-    pp: diisi saat sesi SSH masih sebagai ADMIN (alur `server add`). Agent lalu
-    dijalankan lewat `su - odin` — kalau tidak, memory/audit dibuat sebagai root
-    di /home/odin dan user odin kehilangan akses ke datanya sendiri."""
-    args = f" --project {shlex.quote(project)}" if project else ""
-    inner = (f"printf %s {shlex.quote(_MCP_INIT)} | "
-             f"timeout 25 {ODIN_REMOTE_HOME}/run.sh{args} 2>/tmp/.odin-doctor.err")
-    cmd = f"{pp}su - odin -c {shlex.quote(inner)}" if pp is not None else inner
-    try:
-        out, _, _ = ssh.run(cmd, timeout=40)
-    except Exception as e:
-        return False, f"eksekusi gagal: {e}"
+def _parse_mcp_reply(out: str, errs: str = "") -> tuple[bool, str]:
+    """Hitung tool dari balasan JSON-RPC. Return (hidup, detail)."""
     tools = []
     for line in out.splitlines():
         line = line.strip()
@@ -807,9 +952,82 @@ def _mcp_handshake(ssh: "SSHSession", project: str = "",
             tools = ((msg.get("result") or {}).get("tools")) or []
     if tools:
         return True, f"{len(tools)} tools"
-    errs, _, _ = ssh.run("cat /tmp/.odin-doctor.err 2>/dev/null | tail -3; "
-                         "rm -f /tmp/.odin-doctor.err")
-    return False, errs.strip()[:200] or "tidak ada respons tools/list"
+    tail = "; ".join(l for l in errs.strip().splitlines()[-3:] if l.strip())
+    return False, tail[:200] or "tidak ada respons tools/list"
+
+
+def _parse_diagnose(out: str) -> dict:
+    """Parse laporan `run.sh --diagnose` (baris fakta + seksi bertanda)."""
+    report: dict = {"projects": []}
+    section = None
+    buf: list[str] = []
+    for raw in out.splitlines():
+        line = raw.rstrip("\n")
+        if line.startswith("@@SECTION:"):
+            if section:
+                report[section] = "\n".join(buf)
+            section = line[len("@@SECTION:"):].rstrip("@")
+            buf = []
+            continue
+        if line.startswith("@@END@@"):
+            if section:
+                report[section] = "\n".join(buf)
+            section = None
+            continue
+        if section is not None:
+            buf.append(line)
+            continue
+        if line.startswith("@@"):
+            continue
+        if line.startswith("project="):
+            # "project=<nama> memory=<0|1>"
+            parts = line.split()
+            pname = parts[0].split("=", 1)[1]
+            pmem = parts[1].split("=", 1)[1] == "1" if len(parts) > 1 else False
+            report["projects"].append({"name": pname, "memory": pmem})
+            continue
+        if "=" in line:
+            k, v = line.split("=", 1)
+            report[k.strip()] = v.strip()
+    if section:
+        report[section] = "\n".join(buf)
+    return report
+
+
+def _diag_flag(report: dict, key: str) -> bool:
+    return str(report.get(key, "")).strip() == "1"
+
+
+def _mcp_handshake(ssh, project: str = "",
+                   pp: str | None = None) -> tuple[bool, str]:
+    """Jalankan run.sh lewat SSH & lakukan handshake MCP sungguhan.
+
+    `test -f run.sh` tak membuktikan apa pun: run.sh rusak atau syntax error di
+    agent tetap lulus. Ini mengirim initialize + tools/list lalu menghitung tool
+    yang dikembalikan.
+
+    Payload dikirim lewat STDIN, bukan disisipkan ke string perintah. Versi lama
+    memakai `printf ... | run.sh` — persis bagian yang dibuang forced-command,
+    sehingga handshake SELALU gagal lewat kunci ODIN dan `server harden` me-rollback
+    pengerasan yang baru dipasangnya sendiri.
+
+    pp: diisi saat sesi SSH masih sebagai ADMIN (alur `server add`). Agent lalu
+    dijalankan lewat `su - odin` — kalau tidak, memory/audit dibuat sebagai root
+    di /home/odin dan user odin kehilangan akses ke datanya sendiri."""
+    if isinstance(ssh, AgentSession):
+        return ssh.handshake(project)
+
+    args = f" --project {shlex.quote(project)}" if project else ""
+    inner = f"timeout 25 {ODIN_REMOTE_HOME}/run.sh{args}"
+    cmd = f"{pp}su - odin -c {shlex.quote(inner)}" if pp is not None else inner
+    try:
+        out, errs, _ = ssh.run(cmd, timeout=40, stdin_data=_MCP_INIT)
+    except TypeError:
+        # Sesi palsu di test lama yang belum kenal stdin_data.
+        out, errs, _ = ssh.run(cmd, timeout=40)
+    except Exception as e:
+        return False, f"eksekusi gagal: {e}"
+    return _parse_mcp_reply(out, errs)
 
 
 # ── Sudoers ODIN ────────────────────────────────────────────────────────────
@@ -851,6 +1069,12 @@ odin ALL=(root) NOPASSWD: /usr/bin/df *, /usr/bin/free *, /usr/sbin/nginx -t, \\
 # --deploy-hook='...' yang dieksekusi sebagai root.
 odin ALL=(root) NOPASSWD: /usr/bin/certbot renew --quiet, /usr/bin/certbot renew
 
+# Audit diri sendiri: `run.sh --diagnose` membaca kebijakannya sendiri lewat ini.
+# Argumen TERTUTUP (tanpa wildcard) sehingga tak bisa dipakai membaca file lain,
+# dan isinya bukan rahasia — ia justru aturan yang mengikat user odin. Tanpa rule
+# ini `odin doctor` tak pernah bisa memeriksa sudoers tanpa kredensial admin.
+odin ALL=(root) NOPASSWD: /usr/bin/cat /etc/sudoers.d/odin
+
 # CATATAN: `tail -n * /var/log/*` DIHAPUS (baca file apa pun sebagai root).
 # Log dibaca sebagai user odin lewat tool tail_log. Bila benar-benar perlu membaca
 # log milik root, buat wrapper yang me-realpath argumennya di bawah /var/log lalu
@@ -860,7 +1084,7 @@ odin ALL=(root) NOPASSWD: /usr/bin/certbot renew --quiet, /usr/bin/certbot renew
 """
 
 
-def _install_sudoers(ssh: "SSHSession", pp: str) -> bool:
+def _install_sudoers(ssh: "AdminSession", pp: str) -> bool:
     """Pasang /etc/sudoers.d/odin dengan validasi visudo + rollback.
 
     Sudoers rusak = seluruh sudo di server ikut rusak. Karena itu: tulis ke file
@@ -917,7 +1141,7 @@ def cmd_server_add() -> str | None:
     print()
 
     info(f"Menghubungi {host}:{port} sebagai {user}...")
-    ssh = SSHSession(host, int(port), user, password=password)
+    ssh = AdminSession(host, int(port), user, password=password)
     try:
         ssh.connect()
     except Exception as e:
@@ -1093,6 +1317,86 @@ def cmd_server_add() -> str | None:
 
 
 # ── odin project add ────────────────────────────────────────────────────────
+def _seed_project_mode(name: str, mode: str = "deploy") -> None:
+    """Tulis mode awal project bila belum ada. Idempoten: mode yang sudah
+    tersinkron dari inspect_server TIDAK ditimpa."""
+    try:
+        MODES_DIR.mkdir(parents=True, exist_ok=True)
+        mode_file = MODES_DIR / name
+        if not mode_file.exists():
+            mode_file.write_text(mode + "\n")
+    except OSError:
+        pass                            # bukan alasan menggagalkan project add
+
+
+def _admin_session(server: dict, why: str) -> "AdminSession | None":
+    """Minta kredensial admin & buka sesi shell penuh.
+
+    Dipakai oleh operasi yang MUSTAHIL lewat kunci ODIN (menulis /etc, SFTP,
+    mencabut kunci). Sebelumnya operasi-operasi ini dikirim lewat kunci terbatas
+    dan gagal senyap."""
+    info(why)
+    user = ask_input("User admin (sudo)", default="root")
+    password = getpass.getpass(f"  {_c('1', 'Password SSH')}: ")
+    print()
+    ssh = AdminSession(server["host"], int(server.get("port", 22)), user,
+                       password=password)
+    try:
+        ssh.connect()
+    except Exception as e:
+        err(f"Gagal koneksi SSH admin: {e}")
+        return None
+    return ssh
+
+
+def _provision_via_admin(server: dict, name: str, remote_root: str,
+                         auto: bool = False) -> bool:
+    """Fallback provisioning untuk server yang dispatcher-nya belum kenal
+    --provision (dipasang ODIN <= v2.3). Butuh kredensial admin."""
+    if auto:
+        err("Mode non-interaktif tak bisa meminta password admin.")
+        err(f"Update server dulu: odin update <alias>  (lalu ulangi project add --yes)")
+        return False
+    if not confirm("Coba lewat kredensial admin (sudo)?", default=True):
+        return False
+    ssh = _admin_session(server, "Provisioning butuh akses tulis di /home/odin.")
+    if ssh is None:
+        return False
+    try:
+        out, _, _ = ssh.run("whoami")
+        pp = "" if out.strip() == "root" else "sudo "
+        conf = f"{ODIN_REMOTE_HOME}/projects/{name}.conf"
+        content = (f"PROJECT_NAME={name}\n"
+                   f"PROJECT_ROOT={remote_root}\n"
+                   f"ALLOWED_LOG_DIRS=/var/log,{remote_root}\n")
+        _, errs, rc = ssh.run(
+            f"{pp}mkdir -p {ODIN_REMOTE_HOME}/projects && "
+            f"printf '%s' {shlex.quote(content)} | {pp}tee {conf} > /dev/null && "
+            f"{pp}chown odin:odin {conf} && {pp}chmod 600 {conf}")
+        if rc != 0:
+            err(f"Gagal menulis {conf}: {errs.strip()[:160] or f'rc={rc}'}")
+            return False
+        progress(1, 3, f"Server config: projects/{name}.conf")
+
+        mem = f"{ODIN_REMOTE_HOME}/memory/{name}"
+        _, errs, rc = ssh.run(f"{pp}mkdir -p {mem} && {pp}chown odin:odin {mem} && "
+                              f"{pp}chmod 700 {mem}")
+        if rc != 0:
+            err(f"Gagal membuat {mem}: {errs.strip()[:160] or f'rc={rc}'}")
+            return False
+        progress(2, 3, f"Memory dir: memory/{name}/")
+
+        _, _, rc = ssh.run(f"test -d {shlex.quote(remote_root)}")
+        if rc != 0:
+            warn(f"{remote_root} belum ada di server (project tetap dibuat).")
+        return True
+    except ForcedCommandRejected as e:
+        err(f"Kredensial yang dipakai bukan admin: {e}")
+        return False
+    finally:
+        ssh.close()
+
+
 def cmd_project_add(args=None) -> str | None:
     """Wizard tambah project. Return nama project bila tuntas, None bila gagal."""
     ensure_dirs()
@@ -1158,9 +1462,9 @@ def cmd_project_add(args=None) -> str | None:
 
     server = load_server(server_alias)
 
-    # SSH ke server sebagai odin (pakai key)
+    # SSH ke server sebagai odin (kunci terbatas — TIDAK punya shell).
     key = server.get("key", "")
-    ssh = SSHSession(server["host"], server["port"], "odin", key_path=key)
+    ssh = AgentSession(server["host"], server["port"], key_path=key)
     try:
         ssh.connect()
     except Exception as e:
@@ -1168,33 +1472,33 @@ def cmd_project_add(args=None) -> str | None:
         warn("Pastikan SSH key sudah terpasang (odin server add).")
         return
 
-    # [1] Validasi path remote ada
-    _, _, rc = ssh.run(f"test -d {shlex.quote(remote_root)}")
-    if rc != 0:
-        warn(f"{remote_root} tidak ditemukan di server.")
-        if not (auto or confirm("Lanjutkan tanpa validasi?")):
-            ssh.close()
-            return
-
-    # [2] Buat project conf di server (remote_root sudah tervalidasi aman)
-    conf_lines = [
-        f"PROJECT_NAME={name}",
-        f"PROJECT_ROOT={remote_root}",
-        f"ALLOWED_LOG_DIRS=/var/log,{remote_root}",
-    ]
-    conf_content = "\n".join(conf_lines) + "\n"
-    ssh.run(f"cat > /home/odin/projects/{name}.conf << 'ODIN_EOF'\n{conf_content}ODIN_EOF")
-    progress(1, 3, f"Server config: projects/{name}.conf")
-
-    # [3] Buat memory dir di server
-    ssh.run(f"mkdir -p /home/odin/memory/{name} && chmod 700 /home/odin/memory/{name}")
-    progress(2, 3, f"Memory dir: memory/{name}/")
-
+    # [1-2] Provisioning lewat kanal kontrol run.sh. Dulu langkah ini mengirim
+    # `cat > ...conf` dan `mkdir` sebagai perintah shell lewat kunci terbatas:
+    # sshd membuangnya, rc-nya diabaikan, dan progress() tetap mencetak "✓".
+    # Project tak pernah ada di server dan MCP mati dengan CONNECTION_CLOSED.
+    prov_ok, detail = ssh.provision(name, remote_root)
     ssh.close()
+
+    if not prov_ok:
+        warn(f"Provisioning lewat kunci ODIN gagal: {detail}")
+        if not _provision_via_admin(server, name, remote_root, auto=auto):
+            err("Project TIDAK dibuat di server — konfigurasi lokal tidak ditulis.")
+            return
+    else:
+        if "root_exists=0" in detail:
+            warn(f"{remote_root} belum ada di server (project tetap dibuat).")
+        progress(1, 3, f"Server config: projects/{name}.conf")
+        progress(2, 3, f"Memory dir: memory/{name}/")
 
     # [4] Tulis config lokal kanonik (+ migrasi .mcp.json lama)
     settings_path = _write_local_mcp_config(local_workdir, server_alias, name)
     progress(3, 3, f"Workdir config: {settings_path}")
+
+    # [5a] Semai mode default. Tanpa ini file mode project baru kosong sampai
+    # inspect_server pertama, dan guard versi lama jatuh ke `~/.odin_mode` milik
+    # bersama — mode project lain ikut terbaca. Sekarang tiap project punya
+    # papan sendiri sejak menit pertama.
+    _seed_project_mode(name)
 
     # [5] Tulis ~/.odin/projects/<name>.yaml
     save_project(name, {
@@ -1271,23 +1575,41 @@ def cmd_server_remove(alias: str, purge: bool = False) -> None:
 
     # --purge: cabut dulu kunci dari server SEBELUM kunci lokal dihapus. Tanpa ini
     # server tetap memercayai kunci yang sudah "dihapus" di laptop.
+    # Mencabut kunci = MENULIS authorized_keys, dan kunci ODIN sendiri tak punya
+    # shell untuk melakukannya. Dulu perintahnya dikirim lewat kunci itu juga dan
+    # selalu ditolak; sekarang mintakan kredensial admin secara terus terang.
     if purge and pub_file.exists():
-        try:
-            server = _load_yaml(path)
-            ssh = SSHSession(server["host"], int(server.get("port", 22)), "odin",
-                             key_path=str(key_file))
-            ssh.connect()
-            body = pub_file.read_text().strip().split()
-            body = body[1] if len(body) > 1 else body[0]
-            ak = "/home/odin/.ssh/authorized_keys"
-            _, _, rc = ssh.run(f"grep -v -F {shlex.quote(body)} {ak} > {ak}.new && "
-                               f"mv {ak}.new {ak} && chmod 600 {ak}")
-            ssh.close()
-            ok("Kunci ODIN dicabut dari authorized_keys server." if rc == 0
-               else "Gagal mencabut kunci di server — cabut manual.")
-        except Exception as e:
-            warn(f"--purge gagal terhubung ke server ({e}) — cabut kunci manual di "
-                 f"/home/odin/.ssh/authorized_keys.")
+        server = _load_yaml(path)
+        ssh = _admin_session(
+            server, "Mencabut kunci dari server butuh kredensial admin (sudo).")
+        if ssh is None:
+            warn("Kunci TIDAK dicabut — server masih memercayainya. Cabut manual "
+                 "di /home/odin/.ssh/authorized_keys.")
+        else:
+            try:
+                out, _, _ = ssh.run("whoami")
+                pp = "" if out.strip() == "root" else "sudo "
+                body = pub_file.read_text().strip().split()
+                body = body[1] if len(body) > 1 else body[0]
+                ak = f"{ODIN_REMOTE_HOME}/.ssh/authorized_keys"
+                old, _, rc = ssh.run(f"{pp}cat {ak} 2>/dev/null")
+                if rc != 0:
+                    raise RuntimeError(f"tak bisa membaca {ak}")
+                kept = [l for l in old.splitlines() if l.strip() and body not in l]
+                content = ("\n".join(kept) + "\n") if kept else ""
+                _, errs, rc = ssh.run(
+                    f"printf '%s' {shlex.quote(content)} | {pp}tee {ak} > /dev/null && "
+                    f"{pp}chmod 600 {ak}")
+                if rc == 0:
+                    ok("Kunci ODIN dicabut dari authorized_keys server.")
+                else:
+                    err(f"Gagal mencabut kunci: {errs.strip()[:160] or f'rc={rc}'} "
+                        f"— cabut manual.")
+            except Exception as e:
+                warn(f"--purge gagal ({e}) — cabut kunci manual di "
+                     f"/home/odin/.ssh/authorized_keys.")
+            finally:
+                ssh.close()
 
     path.unlink()
     if key_file.exists():
@@ -1324,7 +1646,7 @@ def _remove_legacy_ssh_entry(alias: str) -> None:
 def cmd_server_test(alias: str) -> None:
     server = load_server(alias)
     key = server.get("key", "")
-    ssh = SSHSession(server["host"], server["port"], "odin", key_path=key)
+    ssh = AgentSession(server["host"], server["port"], key_path=key)
 
     banner(f"ODIN — Test Server '{alias}'")
     try:
@@ -1334,34 +1656,36 @@ def cmd_server_test(alias: str) -> None:
         err(f"SSH gagal: {e}")
         return
 
-    checks = [
-        ("odin_agent.py", "test -f /home/odin/odin_agent.py && echo OK"),
-        ("run.sh executable", "test -x /home/odin/run.sh && echo OK"),
-        ("odin-dispatch.sh", "test -x /home/odin/odin-dispatch.sh && echo OK"),
-        ("mcp module", "/home/odin/.venv/bin/python -c 'from mcp.server.fastmcp import FastMCP; print(\"OK\")' 2>&1"),
-        ("projects/ dir", "test -d /home/odin/projects && echo OK"),
-        ("memory/ dir", "test -d /home/odin/memory && echo OK"),
-    ]
-    for label, cmd in checks:
-        out, _, rc = ssh.run(cmd)
-        status = _c("0;32", "OK") if rc == 0 else _c("0;31", "FAIL")
-        detail = out.strip() if rc == 0 and "OK" not in out else ""
-        extra = f" ({detail})" if detail else ""
-        print(f"  [{status}] {label}{extra}")
+    # Keadaan file DILAPORKAN OLEH SERVER lewat `run.sh --diagnose`. Dulu CLI
+    # mengirim `test -f ...` lewat kunci terbatas: sshd membuangnya, jadi kelima
+    # cek itu SELALU FAIL sesehat apa pun servernya.
+    report, note = ssh.diagnose()
+    if report is None:
+        print(f"  [{_tri(None)}] laporan server tidak terbaca ({note})")
+    else:
+        for label, flagkey in (
+            ("odin_agent.py", "agent_file"),
+            ("run.sh executable", "run_sh_exec"),
+            ("odin-dispatch.sh", "dispatch_exec"),
+            ("mcp module", "mcp_module"),
+            ("projects/ dir", "projects_dir"),
+            ("memory/ dir", "memory_dir"),
+        ):
+            state = _diag_flag(report, flagkey) if flagkey in report else None
+            print(f"  [{_tri(state)}] {label}")
 
     # Bukti fungsional: MCP benar-benar merespons (bukan sekadar file ada).
     live, detail = _mcp_handshake(ssh)
-    status = _c("0;32", "OK") if live else _c("0;31", "FAIL")
-    print(f"  [{status}] handshake MCP ({detail})")
+    print(f"  [{_tri(live)}] handshake MCP ({detail})")
 
-    out, _, _ = ssh.run("ls /home/odin/projects/*.conf 2>/dev/null")
-    if out.strip():
-        print(f"\n  Projects di server:")
-        for line in out.strip().split("\n"):
-            pname = Path(line).stem
-            print(f"    - {pname}")
-    else:
-        info("  Belum ada project di server.")
+    if report is not None:
+        projects = report.get("projects") or []
+        if projects:
+            print(f"\n  Projects di server:")
+            for p in projects:
+                print(f"    - {p['name']}")
+        else:
+            info("  Belum ada project di server.")
 
     ssh.close()
     print()
@@ -1457,15 +1781,23 @@ def cmd_project_status(name: str | None = None) -> None:
     try:
         server = load_server(server_alias)
         key = server.get("key", "")
-        ssh = SSHSession(server["host"], server["port"], "odin", key_path=key)
+        ssh = AgentSession(server["host"], server["port"], key_path=key)
         ssh.connect()
         print(f"  [{_c('0;32', 'OK')}] SSH koneksi")
 
-        _, _, rc = ssh.run(f"test -f /home/odin/projects/{name}.conf", timeout=5)
-        print(f"  [{_c('0;32', 'OK') if rc == 0 else _c('0;31', 'FAIL')}] Server project conf")
+        # Sisi server dilaporkan server sendiri; `test -f` lewat kunci terbatas
+        # dulu selalu FAIL walau conf-nya jelas ada (run.sh bahkan menulisinya).
+        report, note = ssh.diagnose()
+        if report is None:
+            print(f"  [{_tri(None)}] Server project conf ({note})")
+            print(f"  [{_tri(None)}] Server memory dir")
+        else:
+            entry = next((p for p in report.get("projects", []) if p["name"] == name), None)
+            print(f"  [{_tri(entry is not None)}] Server project conf")
+            print(f"  [{_tri(bool(entry and entry['memory']))}] Server memory dir")
 
-        _, _, rc = ssh.run(f"test -d /home/odin/memory/{name}", timeout=5)
-        print(f"  [{_c('0;32', 'OK') if rc == 0 else _c('0;31', 'FAIL')}] Server memory dir")
+        live, detail = _mcp_handshake(ssh, name)
+        print(f"  [{_tri(live)}] Handshake MCP ({detail})")
 
         ssh.close()
     except Exception as e:
@@ -1557,6 +1889,7 @@ def cmd_project_sync(name: str | None = None, sync_all: bool = False) -> None:
             warn(f"{nm}: server '{server_alias}' tak terdaftar — dilewati")
             continue
         path = _write_local_mcp_config(workdir, server_alias, nm)
+        _seed_project_mode(nm)          # pulihkan papan mode yang hilang/belum ada
         ok(f"{nm} → {server_alias}: {path}")
         synced += 1
 
@@ -1570,12 +1903,22 @@ def cmd_update(alias: str) -> None:
     key = server.get("key", "")
 
     banner(f"ODIN — Update Server '{alias}'")
-    ssh = SSHSession(server["host"], server["port"], "odin", key_path=key)
-    try:
-        ssh.connect()
-    except Exception as e:
-        err(f"SSH gagal: {e}")
+
+    # Update WAJIB lewat sesi admin: upload memakai subsystem SFTP, dan
+    # forced-command memblokir negosiasi subsystem ("EOF during negotiation").
+    # Versi lama memakai kunci ODIN di sini, jadi `odin update` tak pernah bisa
+    # dipakai sama sekali — server yang tertinggal versi terus tertinggal.
+    ssh = _admin_session(server, "Update file server butuh kredensial admin (sudo); "
+                                 "kunci ODIN tak bisa dipakai upload (SFTP diblokir).")
+    if ssh is None:
         return
+    try:
+        out, _, _ = ssh.run("whoami")
+    except ForcedCommandRejected as e:
+        err(f"Kredensial yang dipakai bukan admin: {e}")
+        ssh.close()
+        return
+    pp = "" if out.strip() == "root" else "sudo "
 
     missing = [f for f in SERVER_FILES if not (ODIN_INSTALL_DIR / "server" / f).exists()]
     if missing:
@@ -1586,21 +1929,33 @@ def cmd_update(alias: str) -> None:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     modes = {"odin_agent.py": "600", "run.sh": "755", "odin-dispatch.sh": "755"}
 
+    def cleanup(names) -> None:
+        if names:
+            ssh.run(f"{pp}rm -f " + " ".join(f"{ODIN_REMOTE_HOME}/{n}.new" for n in names))
+
     # 1) Backup versi lama — update yang gagal harus bisa dibalik.
     backup_dir = f"{ODIN_REMOTE_HOME}/.backup/{stamp}"
-    ssh.run(f"mkdir -p {backup_dir}")
+    ssh.run(f"{pp}mkdir -p {backup_dir}")
     for name in SERVER_FILES:
-        ssh.run(f"cp -p {ODIN_REMOTE_HOME}/{name} {backup_dir}/ 2>/dev/null || true")
+        ssh.run(f"{pp}cp -p {ODIN_REMOTE_HOME}/{name} {backup_dir}/ 2>/dev/null || true")
 
-    # 2) Upload ke .new — belum menimpa apa pun.
+    # 2) Upload ke .new — belum menimpa apa pun. Lewat /tmp karena user admin
+    #    belum tentu boleh menulis langsung ke /home/odin.
     staged: list[str] = []
     for name in SERVER_FILES:
+        tmp = f"/tmp/.odin-update-{stamp}-{name}"
         dest_new = f"{ODIN_REMOTE_HOME}/{name}.new"
         try:
-            ssh.upload(str(ODIN_INSTALL_DIR / "server" / name), dest_new)
+            ssh.upload(str(ODIN_INSTALL_DIR / "server" / name), tmp)
         except Exception as e:
             err(f"Gagal upload {name}: {e}")
-            ssh.run(f"rm -f {' '.join(ODIN_REMOTE_HOME + '/' + n + '.new' for n in SERVER_FILES)}")
+            cleanup(staged)
+            ssh.close()
+            return
+        _, errs, rc = ssh.run(f"{pp}mv {tmp} {dest_new} && {pp}chown odin:odin {dest_new}")
+        if rc != 0:
+            err(f"Gagal memasang {name}.new: {errs.strip()[:160] or f'rc={rc}'}")
+            cleanup(staged)
             ssh.close()
             return
         staged.append(name)
@@ -1611,28 +1966,35 @@ def cmd_update(alias: str) -> None:
     if rc != 0:
         err(f"odin_agent.py.new GAGAL compile di server — update dibatalkan: "
             f"{(errs or out).strip()[:200]}")
-        ssh.run(f"rm -f {' '.join(ODIN_REMOTE_HOME + '/' + n + '.new' for n in staged)}")
+        cleanup(staged)
         ssh.close()
         return
     for sh in ("run.sh", "odin-dispatch.sh"):
         out, errs, rc = ssh.run(f"bash -n {ODIN_REMOTE_HOME}/{sh}.new")
         if rc != 0:
             err(f"{sh}.new syntax error — update dibatalkan: {(errs or out).strip()[:200]}")
-            ssh.run(f"rm -f {' '.join(ODIN_REMOTE_HOME + '/' + n + '.new' for n in staged)}")
+            cleanup(staged)
             ssh.close()
             return
 
     # 4) Ganti atomik.
     for name in staged:
-        ssh.run(f"mv {ODIN_REMOTE_HOME}/{name}.new {ODIN_REMOTE_HOME}/{name} && "
-                f"chmod {modes[name]} {ODIN_REMOTE_HOME}/{name}")
-        ok(f"{name} diupdate")
+        _, errs, rc = ssh.run(
+            f"{pp}mv {ODIN_REMOTE_HOME}/{name}.new {ODIN_REMOTE_HOME}/{name} && "
+            f"{pp}chown odin:odin {ODIN_REMOTE_HOME}/{name} && "
+            f"{pp}chmod {modes[name]} {ODIN_REMOTE_HOME}/{name}")
+        if rc != 0:
+            err(f"Gagal mengaktifkan {name}: {errs.strip()[:160] or f'rc={rc}'}")
+        else:
+            ok(f"{name} diupdate")
 
-    out, _, _ = ssh.run("grep -m1 '__version__' /home/odin/odin_agent.py | cut -d'\"' -f2")
-    new_ver = out.strip()
+    out, _, _ = ssh.run(f"{pp}grep -m1 '__version__' {ODIN_REMOTE_HOME}/odin_agent.py "
+                        f"| cut -d'\"' -f2")
+    new_ver = out.strip() or "?"
 
-    # 5) Buktikan hasilnya benar-benar jalan; rollback bila tidak.
-    live, detail = _mcp_handshake(ssh)
+    # 5) Buktikan hasilnya benar-benar jalan; rollback bila tidak. Dijalankan
+    #    lewat `su - odin` supaya memory/audit tidak dibuat sebagai root.
+    live, detail = _mcp_handshake(ssh, pp=pp)
     if live:
         ok(f"Handshake MCP OK ({detail})")
     else:
@@ -1643,18 +2005,21 @@ def cmd_update(alias: str) -> None:
     #    forced-command pada kunci. Tanpa langkah ini, server yang sudah
     #    terpasang tak pernah ikut menerima perbaikan K3 — `server add` melewati
     #    server lama dan update sebelumnya tak menyentuh authorized_keys.
-    if not _audit_remote_key(ssh):
+    key_state = _audit_remote_key(ssh, pp)
+    if key_state is None:
+        warn("authorized_keys tak terbaca — status forced-command TIDAK DIKETAHUI.")
+    elif key_state is False:
         pub = Path(key).with_suffix(".pub") if key else None
         if pub and pub.exists():
             info("Kunci SSH belum ber-forced-command — memasang (dengan verifikasi)...")
-            written, old_ak = _write_authorized_keys(ssh, pub.read_text().strip())
+            written, old_ak = _write_authorized_keys(ssh, pub.read_text().strip(), pp)
             if not written:
                 warn("Gagal menulis authorized_keys — kunci dibiarkan apa adanya.")
             else:
                 # Forced-command berlaku saat AUTENTIKASI, jadi sesi ini tak
                 # membuktikan apa pun. Buka koneksi BARU untuk mengujinya; gagal
                 # → kembalikan isi lama supaya server tak terkunci dari ODIN.
-                probe = SSHSession(server["host"], server["port"], "odin", key_path=key)
+                probe = AgentSession(server["host"], server["port"], key_path=key)
                 live2 = False
                 try:
                     probe.connect()
@@ -1665,15 +2030,17 @@ def cmd_update(alias: str) -> None:
                 if live2:
                     ok("Kunci SSH kini forced-command (hanya bisa meluncurkan run.sh)")
                 else:
-                    _restore_authorized_keys(ssh, old_ak)
+                    _restore_authorized_keys(ssh, old_ak, pp)
                     err(f"Verifikasi forced-command GAGAL ({detail2}) — authorized_keys "
                         f"dikembalikan ke isi semula. Server tetap bisa diakses.")
         else:
             warn(f"Kunci publik lokal tak ditemukan — jalankan: odin server harden {alias}")
 
     # 7) Sudoers hanya bisa diperbaiki dengan hak admin — laporkan, jangan diam.
-    findings = _audit_remote_sudoers(ssh)
-    if findings:
+    findings = _audit_remote_sudoers(ssh, pp)
+    if findings is None:
+        warn("Sudoers TIDAK TERBACA — status keamanan tak diketahui (bukan berarti aman).")
+    elif findings:
         err("SUDOERS SERVER MASIH RENTAN:")
         for f in findings:
             err(f"  • {f}")
@@ -1701,7 +2068,7 @@ def cmd_server_harden(alias: str) -> None:
     password = getpass.getpass(f"  {_c('1', 'Password SSH')}: ")
     print()
 
-    ssh = SSHSession(server["host"], int(server.get("port", 22)), user, password=password)
+    ssh = AdminSession(server["host"], int(server.get("port", 22)), user, password=password)
     try:
         ssh.connect()
     except Exception as e:
@@ -1713,7 +2080,9 @@ def cmd_server_harden(alias: str) -> None:
     pp = "" if out.strip() == "root" else "sudo "
 
     before = _audit_remote_sudoers(ssh, pp)
-    if before:
+    if before is None:
+        warn("Sudoers saat ini TIDAK TERBACA — lanjut memasang aturan baru.")
+    elif before:
         warn("Temuan pada sudoers saat ini:")
         for f in before:
             warn(f"  • {f}")
@@ -1743,8 +2112,7 @@ def cmd_server_harden(alias: str) -> None:
         if not written:
             err("Gagal menulis authorized_keys.")
         else:
-            probe = SSHSession(server["host"], int(server.get("port", 22)), "odin",
-                               key_path=key)
+            probe = AgentSession(server["host"], server.get("port", 22), key_path=key)
             live = False
             try:
                 probe.connect()
@@ -1764,7 +2132,10 @@ def cmd_server_harden(alias: str) -> None:
     after = _audit_remote_sudoers(ssh, pp)
     ssh.close()
     print()
-    if after:
+    if after is None:
+        warn(f"Sudoers tak terbaca setelah pemasangan — verifikasi manual: "
+             f"sudo cat /etc/sudoers.d/odin")
+    elif after:
         err("Masih ada temuan sudoers — periksa manual /etc/sudoers.d/odin.")
     else:
         ok(f"Server '{alias}' sudah dikeraskan.")
@@ -1776,7 +2147,7 @@ def cmd_doctor(alias: str) -> None:
     key = server.get("key", "")
 
     banner(f"ODIN — Doctor '{alias}'")
-    ssh = SSHSession(server["host"], server["port"], "odin", key_path=key)
+    ssh = AgentSession(server["host"], server["port"], key_path=key)
     try:
         ssh.connect()
         ok("SSH koneksi berhasil")
@@ -1784,66 +2155,74 @@ def cmd_doctor(alias: str) -> None:
         err(f"SSH gagal: {e}")
         return
 
-    checks = [
-        ("odin_agent.py ada", "test -f /home/odin/odin_agent.py && echo OK"),
-        ("run.sh executable", "test -x /home/odin/run.sh && echo OK"),
-        ("mcp module", "/home/odin/.venv/bin/python -c 'from mcp.server.fastmcp import FastMCP; print(\"OK\")' 2>/dev/null"),
-        ("projects/ dir", "test -d /home/odin/projects && echo OK"),
-        ("memory/ dir", "test -d /home/odin/memory && echo OK"),
-    ]
-    for label, cmd in checks:
-        out, _, rc = ssh.run(cmd)
-        status = _c("0;32", "OK") if rc == 0 and "OK" in out else _c("0;31", "FAIL")
-        print(f"  [{status}] {label}")
+    # Semua fakta sisi server datang dari `run.sh --diagnose`, satu round-trip.
+    # Dulu tiap baris di bawah ini adalah perintah shell lewat kunci terbatas —
+    # lima FAIL palsu, versi "v?", dan baris Disk/Memory yang hilang diam-diam.
+    report, note = ssh.diagnose()
+    if report is None:
+        print(f"  [{_tri(None)}] Laporan server tidak terbaca")
+        warn(f"  {note}")
+    else:
+        for label, flagkey in (
+            ("odin_agent.py ada", "agent_file"),
+            ("run.sh executable", "run_sh_exec"),
+            ("odin-dispatch.sh", "dispatch_exec"),
+            ("mcp module", "mcp_module"),
+            ("projects/ dir", "projects_dir"),
+            ("memory/ dir", "memory_dir"),
+        ):
+            state = _diag_flag(report, flagkey) if flagkey in report else None
+            print(f"  [{_tri(state)}] {label}")
 
     # Postur keamanan — server lama tak otomatis ikut perbaikan v2.3.
-    findings = _audit_remote_sudoers(ssh)
-    if findings:
-        print(f"  [{_c('0;31', 'FAIL')}] sudoers: {len(findings)} pola rentan")
-        for f in findings:
-            print(f"         • {f}")
+    # UNKN itu jawaban yang sah: audit yang buta TIDAK boleh melapor "aman".
+    sud_text = (report or {}).get("sudoers", "")
+    if report is None or "@@UNREADABLE@@" in sud_text:
+        print(f"  [{_tri(None)}] sudoers tak terbaca — jalankan: odin server harden {alias}")
+    elif "@@ABSENT@@" in sud_text:
+        print(f"  [{_tri(True)}] /etc/sudoers.d/odin tidak ada (odin tanpa hak sudo)")
     else:
-        print(f"  [{_c('0;32', 'OK')}] sudoers tanpa pola rentan yang dikenal")
-    if _audit_remote_key(ssh):
-        print(f"  [{_c('0;32', 'OK')}] kunci SSH forced-command")
+        findings = _scan_sudoers(sud_text)
+        if findings:
+            print(f"  [{_tri(False)}] sudoers: {len(findings)} pola rentan")
+            for f in findings:
+                print(f"         • {f}")
+        else:
+            print(f"  [{_tri(True)}] sudoers tanpa pola rentan yang dikenal")
+
+    ak_text = (report or {}).get("authorized_keys", "")
+    if report is None or "@@UNREADABLE@@" in ak_text:
+        print(f"  [{_tri(None)}] status forced-command kunci SSH tak terbaca")
+    elif "@@ABSENT@@" in ak_text or _scan_authorized_keys(ak_text):
+        print(f"  [{_tri(True)}] kunci SSH forced-command")
     else:
-        print(f"  [{_c('0;31', 'FAIL')}] kunci SSH TANPA forced-command "
+        print(f"  [{_tri(False)}] kunci SSH TANPA forced-command "
               f"(kunci memberi shell) → odin server harden {alias}")
 
-    # Version
-    out, _, _ = ssh.run("grep -m1 '__version__' /home/odin/odin_agent.py 2>/dev/null | cut -d'\"' -f2")
-    ver = out.strip() or "?"
-    print(f"  [{'INFO':^4}] ODIN version: v{ver}")
-
-    # Disk
-    out, _, _ = ssh.run("df -h / | tail -1 | awk '{print $5, $4}'")
-    if out.strip():
-        parts = out.strip().split()
-        usage = parts[0] if parts else "?"
-        avail = parts[1] if len(parts) > 1 else "?"
-        print(f"  [{'INFO':^4}] Disk: {usage} used, {avail} available")
-
-    # Memory
-    out, _, _ = ssh.run("free -h 2>/dev/null | grep Mem | awk '{print $3\"/\"$2}'")
-    if out.strip():
-        print(f"  [{'INFO':^4}] Memory: {out.strip()}")
+    if report is not None:
+        ver = report.get("agent_version") or "?"
+        print(f"  [{'INFO':^4}] ODIN version: v{ver}")
+        disk = (report.get("disk") or "").split()
+        if disk:
+            avail = disk[1] if len(disk) > 1 else "?"
+            print(f"  [{'INFO':^4}] Disk: {disk[0]} used, {avail} available")
+        if report.get("mem"):
+            print(f"  [{'INFO':^4}] Memory: {report['mem']}")
 
     # Projects — plus handshake MCP NYATA per project (initialize + tools/list).
-    out, _, _ = ssh.run("ls /home/odin/projects/*.conf 2>/dev/null")
-    if out.strip():
+    projects = (report or {}).get("projects") or []
+    if projects:
         print(f"\n  Projects:")
-        for line in out.strip().split("\n"):
-            pname = Path(line.strip()).stem
-            _, _, rc = ssh.run(f"test -d /home/odin/memory/{pname}")
-            mem_ok = _c("0;32", "✓") if rc == 0 else _c("0;31", "✗")
-            live, detail = _mcp_handshake(ssh, pname)
+        for p in projects:
+            mem_ok = _c("0;32", "✓") if p["memory"] else _c("0;31", "✗")
+            live, detail = _mcp_handshake(ssh, p["name"])
             mcp_ok = _c("0;32", f"✓ {detail}") if live else _c("0;31", f"✗ {detail}")
-            print(f"    {pname} (memory: {mem_ok} | MCP: {mcp_ok})")
+            print(f"    {p['name']} (memory: {mem_ok} | MCP: {mcp_ok})")
     else:
-        info("  Belum ada project di server.")
+        if report is not None:
+            info("  Belum ada project di server.")
         live, detail = _mcp_handshake(ssh)
-        status = _c("0;32", "OK") if live else _c("0;31", "FAIL")
-        print(f"  [{status}] handshake MCP ({detail})")
+        print(f"  [{_tri(live)}] handshake MCP ({detail})")
 
     ssh.close()
     print()
@@ -2050,8 +2429,8 @@ def cmd_setup(args=None) -> None:
     print("\n" + _c("1", "  [4/4] Verifikasi"))
     proj = load_project(name)
     server = load_server(proj["server"])
-    ssh = SSHSession(server["host"], int(server.get("port", 22)), "odin",
-                     key_path=server.get("key", ""))
+    ssh = AgentSession(server["host"], server.get("port", 22),
+                       key_path=server.get("key", ""))
     try:
         ssh.connect()
         live, detail = _mcp_handshake(ssh, name)
